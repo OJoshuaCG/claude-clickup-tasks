@@ -18,7 +18,7 @@
 import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
-import { execFileSync } from 'node:child_process';
+import { execFileSync, spawnSync } from 'node:child_process';
 import { fileURLToPath } from 'node:url';
 
 const HERE = path.dirname(fileURLToPath(import.meta.url));
@@ -359,6 +359,141 @@ check('y el usuario sigue con todo lo suyo', () => {
     JSON.stringify(readSettings().hooks).includes('mi-hook-personal'),
     'perdió el hook del usuario',
   );
+});
+
+// ---------------------------------------------------------------------------------------------
+// El motor no se borra antes de copiarlo.
+//
+// El instalador hacía `fs.rmSync(engineDest, { recursive: true, force: true })` y después
+// copiaba. `force: true` sólo silencia ENOENT: EBUSY, EPERM y ENOTEMPTY siguen tirando. Medido:
+// 1 de cada 5 instalaciones concurrentes reventaba con un stack crudo en pantalla — y el modo de
+// fallo era el peor, porque el motor ya estaba borrado y los tres hooks quedaban apuntando a un
+// archivo inexistente.
+// ---------------------------------------------------------------------------------------------
+console.log('\nEL MOTOR SOBREVIVE A UN BORRADO QUE FALLA\n');
+
+check('al actualizar se borra del motor lo que la versión nueva ya no trae', () => {
+  const c = fs.mkdtempSync(path.join(os.tmpdir(), 'clickup-motor-'));
+  const fc = path.join(c, '.claude');
+  fs.mkdirSync(fc, { recursive: true });
+  fs.writeFileSync(path.join(fc, 'settings.json'), '{}');
+  const e = { ...process.env, CLAUDE_CONFIG_DIR: fc, NO_COLOR: '1' };
+  execFileSync('node', [path.join(REPO, 'src', 'installer.mjs'), '--yes'], { env: e, cwd: REPO, stdio: 'pipe' });
+
+  // Un archivo de una versión anterior que la actual ya no trae.
+  const intruso = path.join(fc, 'clickup-flow', 'src', 'lib', 'version-vieja.mjs');
+  fs.writeFileSync(intruso, 'export const viejo = true;\n');
+  const subdirViejo = path.join(fc, 'clickup-flow', 'src', 'lib', 'obsoleto');
+  fs.mkdirSync(subdirViejo, { recursive: true });
+  fs.writeFileSync(path.join(subdirViejo, 'x.mjs'), 'export default 1;\n');
+
+  execFileSync('node', [path.join(REPO, 'src', 'installer.mjs'), '--yes'], { env: e, cwd: REPO, stdio: 'pipe' });
+  assert(!fs.existsSync(intruso), 'el archivo huérfano del motor sobrevivió a la actualización');
+  assert(!fs.existsSync(subdirViejo), 'el directorio huérfano del motor sobrevivió');
+  assert(
+    fs.existsSync(path.join(fc, 'clickup-flow', 'src', 'cli.mjs')),
+    'la limpieza se llevó el CLI',
+  );
+  fs.rmSync(c, { recursive: true, force: true });
+});
+
+check('un archivo viejo del motor que NO se puede borrar no aborta la instalación', () => {
+  const c = fs.mkdtempSync(path.join(os.tmpdir(), 'clickup-motor2-'));
+  const fc = path.join(c, '.claude');
+  fs.mkdirSync(fc, { recursive: true });
+  fs.writeFileSync(path.join(fc, 'settings.json'), '{}');
+  const e = { ...process.env, CLAUDE_CONFIG_DIR: fc, NO_COLOR: '1' };
+  execFileSync('node', [path.join(REPO, 'src', 'installer.mjs'), '--yes'], { env: e, cwd: REPO, stdio: 'pipe' });
+
+  // Se le quita el permiso de escritura al DIRECTORIO que contiene el archivo huérfano, que es
+  // lo que hace fallar el `unlink` con EACCES. En Windows `chmod` no hace nada, así que ahí el
+  // caso se salta declarándolo: un salto silencioso sería un test que miente.
+  const dirLib = path.join(fc, 'clickup-flow', 'src', 'lib');
+  const huerfano = path.join(dirLib, 'version-vieja.mjs');
+  fs.writeFileSync(huerfano, 'export const viejo = true;\n');
+
+  if (process.platform === 'win32' || process.getuid?.() === 0) {
+    console.log('       (salteado: chmod no bloquea en win32 ni como root)');
+    fs.rmSync(c, { recursive: true, force: true });
+    return;
+  }
+
+  fs.chmodSync(dirLib, 0o500);
+  let r;
+  try {
+    r = execFileSync('node', [path.join(REPO, 'src', 'installer.mjs'), '--yes'], {
+      env: e,
+      cwd: REPO,
+      encoding: 'utf8',
+    });
+  } finally {
+    fs.chmodSync(dirLib, 0o700);
+  }
+
+  assert(fs.existsSync(huerfano), 'el test no probó nada: el archivo sí se pudo borrar');
+  assert(
+    fs.existsSync(path.join(fc, 'clickup-flow', 'src', 'cli.mjs')),
+    'la instalación no dejó el CLI en su lugar',
+  );
+  const s = JSON.parse(fs.readFileSync(path.join(fc, 'settings.json'), 'utf8'));
+  const refs = (JSON.stringify(s.hooks || {}).match(/cli\.mjs/g) || []).length;
+  assert(refs === 3, `los hooks no quedaron registrados: ${refs} referencias`);
+  assert(/no se pudieron borrar/i.test(r), `no avisó del archivo que no pudo borrar:\n${r.slice(-400)}`);
+  fs.rmSync(c, { recursive: true, force: true });
+});
+
+/**
+ * Un fallo que llega al catch de nivel superior.
+ *
+ * Ojo: un `settings.json` ilegible NO sirve para esto — el instalador ya lo maneja con un
+ * mensaje propio y ni se acerca al catch. El caso que sí llega es un directorio de Claude Code
+ * sin permiso de escritura, que es exactamente lo que pasa cuando alguien instaló con `sudo` y
+ * después corre el instalador como su usuario.
+ */
+function instalarEnDirSinPermisos(extraEnv = {}) {
+  const c = fs.mkdtempSync(path.join(os.tmpdir(), 'clickup-permisos-'));
+  const fc = path.join(c, '.claude');
+  fs.mkdirSync(fc, { recursive: true });
+  fs.writeFileSync(path.join(fc, 'settings.json'), '{}');
+  fs.chmodSync(fc, 0o500);
+  try {
+    return spawnSync('node', [path.join(REPO, 'src', 'installer.mjs'), '--yes'], {
+      env: { ...process.env, CLAUDE_CONFIG_DIR: fc, NO_COLOR: '1', ...extraEnv },
+      cwd: REPO,
+      encoding: 'utf8',
+    });
+  } finally {
+    fs.chmodSync(fc, 0o700);
+    fs.rmSync(c, { recursive: true, force: true });
+  }
+}
+
+const puedeProbarPermisos = process.platform !== 'win32' && process.getuid?.() !== 0;
+
+check('un error del instalador sale por stderr, sin stack trace', () => {
+  if (!puedeProbarPermisos) {
+    console.log('       (salteado: chmod no bloquea en win32 ni como root)');
+    return;
+  }
+  const r = instalarEnDirSinPermisos();
+  assert(r.status !== 0, 'un directorio sin permisos tendría que fallar');
+  const err = r.stderr ?? '';
+  const out = r.stdout ?? '';
+  assert(err.trim().length > 0, `el error no salió por stderr (stdout: ${out.slice(-300)})`);
+  assert(!/\n\s+at .+:\d+:\d+/.test(err + out), `filtró un stack trace:\n${(err + out).slice(-400)}`);
+  assert(/CLICKUP_FLOW_DEBUG/.test(err), `no dice cómo ver el detalle técnico:\n${err}`);
+  assert(/permisos/i.test(err), `no explica que es un problema de permisos:\n${err}`);
+});
+
+check('con CLICKUP_FLOW_DEBUG=1 sí aparece el stack, y por stderr', () => {
+  if (!puedeProbarPermisos) {
+    console.log('       (salteado: chmod no bloquea en win32 ni como root)');
+    return;
+  }
+  const r = instalarEnDirSinPermisos({ CLICKUP_FLOW_DEBUG: '1' });
+  assert(r.status !== 0, 'tendría que fallar');
+  assert(/\n\s+at .+:\d+:\d+/.test(r.stderr ?? ''), `con DEBUG=1 no mostró el stack:\n${r.stderr}`);
+  assert(!/\n\s+at .+:\d+:\d+/.test(r.stdout ?? ''), 'el stack salió por stdout');
 });
 
 console.log(`\n${pass} pasaron, ${fail} fallaron\n`);

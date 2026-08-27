@@ -109,6 +109,58 @@ function copyDirFiltered(from, to) {
 }
 
 /**
+ * Borra del motor instalado lo que la versión nueva ya no trae.
+ *
+ * Devuelve `{ borrados, retenidos }`.
+ *
+ * Reemplaza a un `rmSync` del directorio entero antes de copiar. Un archivo que no se puede
+ * borrar se informa y se sigue: dejar un `.mjs` viejo que nadie importa es molesto, abortar la
+ * instalación por él es peor.
+ */
+function pruneOrphanEngineFiles(from, to) {
+  const esperados = new Set();
+  (function recorrer(dir, prefijo) {
+    for (const entry of fs.readdirSync(dir, { withFileTypes: true })) {
+      const rel = prefijo ? `${prefijo}/${entry.name}` : entry.name;
+      if (entry.isDirectory()) recorrer(path.join(dir, entry.name), rel);
+      else if (entry.isFile()) esperados.add(rel);
+    }
+  })(from, '');
+
+  const borrados = [];
+  const retenidos = [];
+  (function limpiar(dir, prefijo) {
+    let entradas;
+    try {
+      entradas = fs.readdirSync(dir, { withFileTypes: true });
+    } catch {
+      return;
+    }
+    for (const entry of entradas) {
+      const rel = prefijo ? `${prefijo}/${entry.name}` : entry.name;
+      const abs = path.join(dir, entry.name);
+      if (entry.isDirectory()) {
+        limpiar(abs, rel);
+        try {
+          if (fs.readdirSync(abs).length === 0) fs.rmdirSync(abs);
+        } catch {
+          /* un directorio que no se vacía no es un problema del usuario */
+        }
+      } else if (!esperados.has(rel)) {
+        try {
+          fs.rmSync(abs, { force: true });
+          borrados.push(rel);
+        } catch {
+          retenidos.push(rel);
+        }
+      }
+    }
+  })(to, '');
+
+  return { borrados, retenidos };
+}
+
+/**
  * Manifiesto de archivos instalados.
  *
  * Existe por un modo de fallo concreto y verificado: si una versión renombra o deja de traer un
@@ -603,9 +655,20 @@ async function install(args) {
   if (path.resolve(engineSrc) === path.resolve(engineDest)) {
     ok(`motor ya en su lugar → ${forwardSlash(engineDest)}`);
   } else {
-    fs.rmSync(engineDest, { recursive: true, force: true });
+    // Copiar primero: si algo falla, el motor viejo sigue entero y los hooks siguen andando.
     copyDirFiltered(engineSrc, engineDest);
+    const huerfanos = pruneOrphanEngineFiles(engineSrc, engineDest);
     ok(`motor → ${forwardSlash(engineDest)}`);
+    if (huerfanos.borrados.length) {
+      note(`archivos de una versión anterior borrados: ${huerfanos.borrados.length}`);
+    }
+    if (huerfanos.retenidos.length) {
+      warn(
+        `no se pudieron borrar ${huerfanos.retenidos.length} archivo(s) viejo(s) del motor ` +
+          '(¿antivirus, OneDrive, o un editor abierto ahí?). La instalación quedó completa; ' +
+          'esos archivos sobrantes no se ejecutan.',
+      );
+    }
   }
 
   const cli = cliInvocation(config);
@@ -908,8 +971,29 @@ async function main() {
 main()
   .then((code) => process.exit(typeof code === 'number' ? code : 0))
   .catch((err) => {
-    say('');
-    fail(err instanceof Error ? err.stack || err.message : String(err));
-    say('');
+    // El resto de la herramienta no le muestra stacks al usuario; el instalador tampoco debería.
+    // Y un error va a stderr: quien redirige stdout a un log espera ahí el progreso, no la falla.
+    const msg = err instanceof Error ? err.message : String(err);
+    const codigo = err && typeof err === 'object' && 'code' in err ? String(err.code) : null;
+    process.stderr.write(`\n  La instalación no se completó: ${msg}\n`);
+    if (codigo === 'EACCES' || codigo === 'EPERM') {
+      process.stderr.write(
+        '  Parece un problema de permisos sobre el directorio de Claude Code.\n' +
+          '  Cerrá lo que esté usando esa carpeta y volvé a intentar.\n',
+      );
+    } else if (codigo === 'EBUSY' || codigo === 'ENOTEMPTY') {
+      process.stderr.write(
+        '  Un archivo está en uso (antivirus, OneDrive, o un editor abierto ahí).\n' +
+          '  Cerralo y volvé a correr el instalador: es idempotente.\n',
+      );
+    } else if (codigo === 'ENOSPC') {
+      process.stderr.write('  No queda espacio en disco.\n');
+    }
+    if (process.env.CLICKUP_FLOW_DEBUG && err instanceof Error && err.stack) {
+      process.stderr.write(`\n${err.stack}\n`);
+    } else {
+      process.stderr.write('  Detalle técnico: CLICKUP_FLOW_DEBUG=1 y volvé a correrlo.\n');
+    }
+    process.stderr.write('\n');
     process.exit(1);
   });
