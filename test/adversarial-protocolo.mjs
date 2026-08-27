@@ -139,6 +139,79 @@ check('el protocolo SIEMPRE manda fallar cerrado si ClickUp no responde', () => 
   }
 });
 
+check('el protocolo declara el rol y su dirección de entrega', () => {
+  const be = PR.renderContext(ctxFor({ mode: 'tasks', list_id: '1', role: 'backend', counterpart: '/a/fe' }));
+  assert(be.includes('Rol: **backend**'), 'no declara el rol backend');
+  assert(be.includes('/a/fe'), 'no nombra la contraparte');
+
+  const fe = PR.renderContext(ctxFor({ mode: 'tasks', list_id: '1', role: 'frontend' }));
+  assert(fe.includes('Rol: **frontend**'), 'no declara el rol frontend');
+  assert(fe.includes('final de la cadena'), 'no dice que el frontend cierra la cadena');
+
+  const full = PR.renderContext(ctxFor({ mode: 'tasks', list_id: '1', role: 'fullstack' }));
+  assert(full.includes('las dos puntas'), 'no describe el fullstack');
+});
+
+check('un BACKEND sin contraparte recibe la ADVERTENCIA de no parkear', () => {
+  // Es el hallazgo que motivó el modelo de rol: sin esta advertencia el protocolo decía
+  // "si dudás, va al estado de handoff" y la tarea quedaba esperando a nadie.
+  const out = PR.renderContext(ctxFor({ mode: 'tasks', list_id: '1', role: 'backend' }));
+  assert(out.includes('NO parkees nada'), 'no advierte que no puede parkear');
+  assert(out.includes('esperando a nadie'), 'no explica la consecuencia');
+  assert(out.includes('siempre'), 'no dice que cierra siempre');
+
+  // Y con contraparte, la advertencia desaparece y aparece el handoff.
+  const con = PR.renderContext(
+    ctxFor({ mode: 'tasks', list_id: '1', role: 'backend', counterpart: '/a/fe' }),
+  );
+  assert(!con.includes('NO parkees nada'), 'advierte incluso con contraparte');
+});
+
+check('el FRONTEND sabe que su bandeja NO es `to do`', () => {
+  const out = PR.renderContext(ctxFor({ mode: 'tasks', list_id: '1', role: 'frontend' }));
+  assert(/bandeja de entrada es `update required`, no `to do`/.test(out), 'no aclara la bandeja');
+  assert(out.includes('backlog del otro rol'), 'no dice de quién es el `to do`');
+  // Y que reclama con `in progress`, para que nadie más la tome.
+  assert(out.includes('avisa que ya la estás haciendo'), 'no explica por qué reclama');
+});
+
+check('el FRONTEND puede pedir trabajo aunque el backend no esté registrado', () => {
+  const out = PR.renderContext(ctxFor({ mode: 'tasks', list_id: '1', role: 'frontend' }));
+  assert(out.includes('exista o no'), 'no aclara que el pedido no depende del repo registrado');
+  assert(out.includes('/tarea bloqueo'), 'no dice cómo dejar el pedido');
+  assert(
+    out.includes('Nunca devuelvas una tarea a `update required`'),
+    'no prohíbe devolver al estado de handoff',
+  );
+});
+
+console.log('\nprotocol.mjs — el bloqueo no es un veto\n');
+
+check('una colisión se plantea UNA vez y ofrece tres salidas', () => {
+  const out = PR.renderContext(ctxFor({ mode: 'tasks', list_id: '1', role: 'fullstack' }));
+  assert(out.includes('no se veta'), 'no aclara que no es un veto');
+  assert(out.includes('decide el usuario'), 'no dice de quién es la decisión');
+  // Las tres salidas, explícitas.
+  assert(out.includes('No es la misma tarea'), 'falta la salida "no es la misma"');
+  assert(out.includes('la hago igual'), 'falta la salida "seguir igual"');
+  assert(out.includes('No la hago'), 'falta la salida "no la hago"');
+  assert(out.includes('no lo vuelvas a plantear'), 'no dice que se plantea una sola vez');
+});
+
+check('si el usuario decide seguir, el aviso a la otra persona es obligatorio', () => {
+  const out = PR.renderContext(ctxFor({ mode: 'tasks', list_id: '1', role: 'backend' }));
+  assert(out.includes('TRABAJO EN PARALELO'), 'no exige el comentario');
+  assert(out.includes('notify_all'), 'no exige la notificación');
+  assert(out.includes('NO es opcional'), 'no marca el comentario como obligatorio');
+  assert(out.includes('en el merge'), 'no explica qué evita');
+});
+
+check('una tarea cerrada tampoco es un veto', () => {
+  const out = PR.renderContext(ctxFor({ mode: 'tasks', list_id: '1', role: 'fullstack' }));
+  assert(out.includes('no prohíbe volver a tocarla'), 'trata `complete` como veto');
+  assert(out.includes('REAPERTURA'), 'no menciona la reapertura como salida');
+});
+
 check('un proyecto sin registrar produce el texto de "no configurado"', () => {
   const cfg = C.defaultConfig();
   const out = PR.renderContext(PR.buildContext(cfg, '/tmp/no-registrado'));

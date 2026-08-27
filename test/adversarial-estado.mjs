@@ -321,6 +321,62 @@ check('effectiveStatuses marca si los nombres venían del tablero', () => {
   );
 });
 
+console.log('\nCONFIG: rol y contraparte (dirección de las entregas)\n');
+
+check('sin rol declarado, se comporta como fullstack', () => {
+  for (const entry of [{}, { role: null }, { role: 'inventado' }, { role: 42 }]) {
+    const rb = C.roleBehaviour(entry);
+    assert(rb.role === C.ROLES.FULLSTACK, `rol ${rb.role} con ${JSON.stringify(entry)}`);
+    assert(rb.canHandoff === false, 'un fullstack no entrega hacia adelante');
+    assert(rb.closesChain === true, 'un fullstack cierra la cadena');
+  }
+});
+
+check('un BACKEND sin contraparte NO puede parkear en handoff', () => {
+  // La regla que evita la tarea que espera a nadie: sin frontend registrado, nadie mira ese
+  // filtro, así que parkear ahí PIERDE la tarea con apariencia de haberla entregado.
+  const rb = C.roleBehaviour({ role: 'backend' });
+  assert(rb.canHandoff === false, 'dejó parkear sin contraparte');
+  assert(rb.closesChain === true, 'debería cerrar la cadena');
+});
+
+check('un BACKEND con contraparte SÍ puede parkear', () => {
+  const rb = C.roleBehaviour({ role: 'backend', counterpart: '/a/fe' });
+  assert(rb.canHandoff === true, 'no deja parkear con contraparte');
+  assert(rb.counterpart === '/a/fe', 'perdió la contraparte');
+  assert(rb.closesChain === false, 'con contraparte no cierra la cadena');
+});
+
+check('un FRONTEND puede pedir trabajo al otro rol con o sin contraparte', () => {
+  // Opción (b) del usuario: el pedido es a una PERSONA, no a un repositorio. Una tarea con el
+  // pedido escrito la encuentra cualquiera; no hace falta que nadie vigile un filtro.
+  for (const counterpart of [null, '/a/be']) {
+    const rb = C.roleBehaviour({ role: 'frontend', counterpart });
+    assert(rb.canRequestFromOther === true, `no puede pedir con counterpart=${counterpart}`);
+    assert(rb.canHandoff === false, 'un frontend no entrega hacia adelante');
+    assert(rb.closesChain === true, 'un frontend cierra la cadena');
+  }
+});
+
+check('la bandeja de entrada depende del rol', () => {
+  assert(C.roleBehaviour({ role: 'backend' }).inbox === 'todo', 'backend mira el backlog');
+  assert(
+    C.roleBehaviour({ role: 'frontend' }).inbox === 'handoff',
+    'el frontend NO mira `to do`: eso es backlog del otro rol',
+  );
+  assert(C.roleBehaviour({ role: 'fullstack' }).inbox === 'todo', 'fullstack mira lo suyo');
+});
+
+check('un backend NUNCA pide trabajo hacia atrás', () => {
+  // Sería el camino inverso del handoff, y no existe: el backend recibe pedidos, no los emite.
+  for (const cp of [null, '/a/fe']) {
+    assert(
+      C.roleBehaviour({ role: 'backend', counterpart: cp }).canRequestFromOther === false,
+      'un backend no emite pedidos al frontend',
+    );
+  }
+});
+
 console.log('\nCONFIG: identidad\n');
 
 check('identityReady exige id Y confirmación', () => {

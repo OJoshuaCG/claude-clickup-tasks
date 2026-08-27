@@ -17,6 +17,7 @@ import {
   gitEmail,
   effectiveDefaults,
   effectiveStatuses,
+  roleBehaviour,
 } from './config.mjs';
 import { cliInvocation } from './paths.mjs';
 import { readState, exemptionStatus } from './state.mjs';
@@ -70,6 +71,8 @@ export function buildContext(config, cwd) {
       return gitEmailCache;
     },
     statuses: effectiveStatuses(entry),
+    // Rol + contraparte: deciden la dirección de las entregas y cuál es la bandeja de entrada.
+    roleBehaviour: roleBehaviour(entry),
     cli: cliInvocation(config),
     today: today(),
     // Con la ventana en 0 (sin límite) no hay fecha de corte: el renderer omite el filtro.
@@ -95,6 +98,7 @@ export function renderContext(ctx) {
   const p = ctx.project;
   const d = ctx.defaults;
   const st = ctx.statuses;
+  const rb = ctx.roleBehaviour;
   const out = [];
 
   out.push(`# Protocolo de tareas ClickUp — ${p.name}`);
@@ -175,6 +179,71 @@ export function renderContext(ctx) {
       '⚠️ **Estos nombres son los defaults, no se confirmaron contra el tablero.** Antes del primer ' +
         `update, verificalos con \`clickup_get_list list_id:"${p.list_id ?? '<list_id>'}"\` y, si no ` +
         `coinciden, guardalos: \`${ctx.cli} project set … --status-in-progress "<nombre real>" …\``,
+    );
+  }
+  out.push('');
+
+  // ---- Rol y dirección de las entregas --------------------------------------------------------
+  out.push('## El rol de este proyecto en la cadena');
+  out.push('');
+  out.push(`Rol: **${rb.role}**${rb.counterpart ? ` · contraparte: \`${rb.counterpart}\`` : ' · sin contraparte registrada'}`);
+  out.push('');
+  if (rb.role === 'backend') {
+    out.push(
+      '**Entregás hacia adelante.** Tu bandeja de entrada es el backlog en ' +
+        `\`${st.todo}\`, más los pedidos que el otro rol te haya dejado en \`${st.on_hold}\`.`,
+    );
+    out.push('');
+    if (rb.canHandoff) {
+      out.push(
+        `Al cerrar podés dejar la tarea en \`${st.handoff}\` para que la tome \`${rb.counterpart}\`. ` +
+          'Ese estado significa **una sola cosa**: falta el otro rol.',
+      );
+    } else {
+      out.push(
+        `⚠️ **NO hay contraparte registrada, así que NO parkees nada en \`${st.handoff}\`.** ` +
+          'Nadie mira ese filtro: la tarea quedaría esperando a nadie, con la apariencia de haber ' +
+          `sido entregada. Cerrá en \`${st.done}\`.`,
+      );
+      out.push('');
+      out.push(
+        'Si de verdad hay otro repositorio que consume esto, registralo con `/clickup-setup` y ' +
+          `declaralo como contraparte — recién ahí \`${st.handoff}\` reserva algo.`,
+      );
+    }
+  } else if (rb.role === 'frontend') {
+    out.push(
+      `**Tu bandeja de entrada es \`${st.handoff}\`, no \`${st.todo}\`.** Lo que está en ` +
+        `\`${st.todo}\` es backlog del otro rol y no se toca desde acá.`,
+    );
+    out.push('');
+    out.push(
+      '**Sos el final de la cadena**: no entregás hacia adelante. Cuando terminás, la tarea va a ' +
+        `\`${st.done}\`.`,
+    );
+    out.push('');
+    out.push(
+      '**Y reclamás como todos.** Pasar la tarea a ' +
+        `\`${st.in_progress}\` es lo que avisa que ya la estás haciendo y evita que otra persona la ` +
+        'tome. El rol va declarado en el comentario `INICIO`, porque el estado por sí solo no dice ' +
+        'quién la tiene.',
+    );
+    out.push('');
+    out.push(
+      `**Si necesitás algo del otro rol**, no te bloquees: hacé todo lo que puedas de lo tuyo, y ` +
+        `dejá el trabajo del otro lado en \`${st.on_hold}\` con un pedido concreto ` +
+        '(`/tarea bloqueo`). Eso vale **exista o no** su repositorio registrado: el pedido es a una ' +
+        'persona, y una tarea con el pedido escrito la encuentra cualquiera.',
+    );
+    out.push('');
+    out.push(
+      `**Nunca devuelvas una tarea a \`${st.handoff}\`.** Ese estado significa "falta el frontend": ` +
+        'devolverla ahí la deja en tu propio filtro y quien tiene que actuar no se entera nunca.',
+    );
+  } else {
+    out.push(
+      '**Hacés las dos puntas.** No hay entregas entre proyectos: lo que terminás, lo cerrás. ' +
+        `El estado \`${st.handoff}\` no se usa acá.`,
     );
   }
   out.push('');
@@ -317,10 +386,10 @@ export function renderContext(ctx) {
   out.push('| Estado | Acción |');
   out.push('| --- | --- |');
   out.push(
-    `| \`${st.in_progress}\` | Leé el último \`INICIO\` (\`clickup_get_task_comments\`): **quién**, **desde cuándo**, qué **rol**. Si venís a hacer lo mismo → **PARÁ e informá quién la tiene**. Si el \`INICIO\` es de otro rol y vos tocás lo tuyo → no la toques, derivá |`,
+    `| \`${st.in_progress}\` | Alguien la tiene. Leé el último \`INICIO\`: **quién**, **desde cuándo**, qué **rol**. Después seguí *"Si el trabajo ya está tomado"* — se plantea una vez y decide el usuario, no se veta |`,
   );
   out.push(
-    `| \`${st.done}\` | **PARÁ Y AVISÁ: este trabajo ya se hizo.** Mostrá el resumen del \`FIN\`, quién lo cerró y cuándo, y **esperá confirmación antes de tocar una línea** |`,
+    `| \`${st.done}\` | Ya se hizo. Mostrá el resumen del \`FIN\`, quién lo cerró y cuándo, y ofrecé las tres salidas de *"Si el trabajo ya está tomado"*. Reabrir es una de ellas |`,
   );
   out.push(`| \`${st.todo}\` | Libre. Se puede tomar |`);
   out.push(
@@ -335,6 +404,60 @@ export function renderContext(ctx) {
     '| cualquier otro estado | Significado **no declarado** en este flujo. **Preguntá** antes de asumir |',
   );
   out.push('| No existe | Crear la tarea (abajo) |');
+  out.push('');
+
+  // ---- Si el trabajo ya está tomado -----------------------------------------------------------
+  out.push('## Si el trabajo ya está tomado: se avisa UNA vez, no se veta');
+  out.push('');
+  out.push(
+    'Encontrar la tarea en curso de otra persona **no cancela el trabajo**. El protocolo existe ' +
+      'para que nadie duplique por accidente, no para negarle trabajo al usuario por un estado en ' +
+      'un tablero.',
+  );
+  out.push('');
+  out.push('**La regla: se plantea una sola vez, con la información completa, y decide el usuario.**');
+  out.push('');
+  out.push('**1. Traé los datos antes de hablar.** `clickup_get_task_comments` y leé el último');
+  out.push('`INICIO`: **quién** la tiene, **desde cuándo**, y con qué **rol**. Sin eso no hay nada');
+  out.push('que plantear — "alguien la tiene" no es información.');
+  out.push('');
+  out.push('**2. Presentale al usuario las tres salidas, explícitamente:**');
+  out.push('');
+  out.push('| Opción | Cuándo | Qué hacés |');
+  out.push('| --- | --- | --- |');
+  out.push(
+    '| **No es la misma tarea** | El título se parece pero el alcance es otro. **Es el caso más frecuente** | Tarea NUEVA, vinculada a la que encontraste con `clickup_add_task_link`. Nadie pisa a nadie |',
+  );
+  out.push(
+    '| **Sí es la misma, y la hago igual** | El usuario lo decide a sabiendas: urgencia, la otra persona no está, o van a trabajar juntos | Sumate a los asignados (unión) y dejá un comentario `TRABAJO EN PARALELO` con `notify_all: true` |',
+  );
+  out.push('| **No la hago** | El usuario prefiere coordinar primero | Parás, y le decís a quién escribirle |');
+  out.push('');
+  out.push(
+    '**3. Con la respuesta, procedé y no lo vuelvas a plantear.** Ya se decidió. Repetir la ' +
+      'advertencia en cada turno es exactamente lo que hace que la gente deje de leerla.',
+  );
+  out.push('');
+  out.push(
+    '**Si elige seguir, el comentario NO es opcional.** Es lo único que evita que la otra persona ' +
+      'descubra el trabajo duplicado en el merge:',
+  );
+  out.push('');
+  out.push('```');
+  out.push(`**Ejecutor:** ${ctx.gitEmail ?? '<email de git>'}`);
+  if (rb.role !== 'fullstack') out.push(`**Rol:** ${rb.role}`);
+  out.push('**Acción:** TRABAJO EN PARALELO — <tarea>');
+  out.push('**Quién la tenía:** <email del INICIO anterior> desde <fecha>');
+  out.push('**Por qué sigo igual:** <la razón que dio el usuario, textual>');
+  out.push('**Qué voy a tocar:** <archivos o módulos, para que se pueda ver el solapamiento>');
+  out.push('```');
+  out.push('');
+  out.push(
+    '**Lo mismo vale para una tarea ya cerrada.** Que esté ' +
+      `\`${st.done}\` no prohíbe volver a tocarla: mostrá el resumen del \`FIN\`, quién la cerró y ` +
+      'cuándo, y ofrecé las mismas tres salidas. La diferencia es que acá la opción "es la misma" ' +
+      'significa **reabrir** con un comentario `REAPERTURA`.',
+  );
   out.push('');
 
   // ---- Creating -------------------------------------------------------------------------
@@ -486,8 +609,8 @@ export function renderContext(ctx) {
   // ---- Closing --------------------------------------------------------------------------
   out.push('## Paso 3 — Cerrar');
   out.push('');
-  if (p.handoff) {
-    out.push('**La pregunta obligatoria: ¿esto necesita trabajo de frontend?**');
+  if (rb.canHandoff) {
+    out.push(`**La pregunta obligatoria: ¿esto necesita trabajo de \`${rb.counterpart}\`?**`);
     out.push('');
     out.push('```');
     out.push('              ¿el cambio necesita implementación visual?');
@@ -500,7 +623,7 @@ export function renderContext(ctx) {
     out.push('```');
     out.push('');
     out.push(
-      '**Criterio para decir "no requiere frontend" con honestidad:** no alcanza con que *vos* no ' +
+      '**Criterio para decir que no lo requiere, con honestidad:** no alcanza con que *vos* no ' +
         'hayas tocado el frontend. Hay que poder afirmar que **nada de lo que el frontend ya ' +
         'consume cambió**: ni rutas, ni forma de la respuesta, ni códigos de error, ni campos ' +
         'obligatorios del request. **Si dudás, va a `update required`** — un handoff de más cuesta ' +
@@ -511,6 +634,20 @@ export function renderContext(ctx) {
       '**`update required` significa UNA cosa: falta el frontend.** Para "quedó a medias" está ' +
         '`on hold`. Si se usa para las dos, el filtro del frontend se llena de ruido y el mecanismo ' +
         'pierde el sentido.',
+    );
+    out.push('');
+  }
+  if (!rb.canHandoff && rb.role === 'backend') {
+    out.push(
+      `**Cerrás en \`${st.done}\`, siempre.** No hay contraparte registrada, así que no hay a quién ` +
+        'entregarle: parkear la tarea la dejaría esperando a nadie.',
+    );
+    out.push('');
+  } else if (rb.role === 'frontend') {
+    out.push(
+      `**Cerrás en \`${st.done}\`: sos el final de la cadena.** Si al implementar descubrís que ` +
+        'falta algo del otro rol, eso NO cambia el cierre de tu tarea — se registra como un pedido ' +
+        'aparte con `/tarea bloqueo`.',
     );
     out.push('');
   }

@@ -16,6 +16,78 @@ import { configPath, toolHome, canonicalProjectKey } from './paths.mjs';
 export const CONFIG_VERSION = 1;
 
 /** Modes a project can be in. `excluded` is a real, recorded answer — not the absence of one. */
+/**
+ * El ROL de un proyecto dentro de la cadena de entrega.
+ *
+ * Reemplaza al booleano `handoff`, que no alcanzaba por dos motivos:
+ *
+ *   1. No tenía DIRECCIÓN. El flujo es asimétrico: un backend entrega dejando la tarea en el
+ *      estado de handoff, donde el frontend la va a buscar; un frontend que necesita algo del
+ *      backend NO usa ese estado —devolverla ahí la deja en el filtro de quien ya terminó, y
+ *      nadie del backend se enteraría— sino `on hold` con un pedido concreto.
+ *   2. No sabía si había alguien del otro lado. Un backend que parkea una tarea en el estado de
+ *      handoff sin un frontend que mire ese filtro deja la tarea esperando a NADIE. Parece que
+ *      entregó, y en realidad la perdió.
+ */
+export const ROLES = Object.freeze({
+  BACKEND: 'backend',
+  FRONTEND: 'frontend',
+  FULLSTACK: 'fullstack',
+});
+
+/**
+ * Qué puede hacer un proyecto al cerrar y dónde busca su trabajo, derivado de rol + contraparte.
+ *
+ * La asimetría es deliberada y sale del flujo real:
+ *
+ * - Un BACKEND sin contraparte registrada **no puede parkear en handoff**: no hay quien mire ese
+ *   estado, así que cierra. Es la regla que evita la tarea que espera a nadie.
+ * - Un FRONTEND **sí puede pedirle trabajo al backend aunque su repo no esté registrado**, porque
+ *   el pedido es a una persona, no a un repositorio: una tarea en `on hold` con un pedido escrito
+ *   la encuentra cualquiera, no hace falta que nadie vigile un filtro.
+ */
+export function roleBehaviour(entry) {
+  const role = [ROLES.BACKEND, ROLES.FRONTEND, ROLES.FULLSTACK].includes(entry?.role)
+    ? entry.role
+    : ROLES.FULLSTACK;
+  const counterpart = entry?.counterpart || null;
+
+  switch (role) {
+    case ROLES.BACKEND:
+      return {
+        role,
+        counterpart,
+        // Solo con contraparte: si no hay frontend registrado, parkear pierde la tarea.
+        canHandoff: Boolean(counterpart),
+        // Su bandeja es el backlog más los pedidos que le dejó el otro lado.
+        inbox: 'todo',
+        canRequestFromOther: false,
+        closesChain: !counterpart,
+      };
+    case ROLES.FRONTEND:
+      return {
+        role,
+        counterpart,
+        // El frontend es el final de la cadena: no entrega hacia adelante, cierra.
+        canHandoff: false,
+        // Su entrada natural es el estado de handoff, NO `to do` (eso es backlog del backend).
+        inbox: 'handoff',
+        // Opción (b): puede pedirle trabajo al backend exista o no su repo.
+        canRequestFromOther: true,
+        closesChain: true,
+      };
+    default:
+      return {
+        role: ROLES.FULLSTACK,
+        counterpart: null,
+        canHandoff: false,
+        inbox: 'todo',
+        canRequestFromOther: false,
+        closesChain: true,
+      };
+  }
+}
+
 export const MODES = Object.freeze({
   TASKS: 'tasks', // several normal tasks in a list (mensajeria-style)
   UMBRELLA: 'umbrella', // one parent task, work happens in subtasks (frontend/backend-style)

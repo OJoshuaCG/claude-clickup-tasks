@@ -172,7 +172,9 @@ step('los emails de git del equipo quedan mapeados, y los deducidos sin confirma
 
 console.log('\nPASO 3 — configurar tres proyectos, uno por cada modo\n');
 
-step('mensajeria-api: tareas normales, con handoff', () => {
+step('mensajeria-api: backend SIN contraparte registrada', () => {
+  // Caso deliberado: un backend cuyo frontend no está registrado con la herramienta. Tiene que
+  // cerrar siempre, nunca parkear — si parkeara, la tarea quedaría esperando a nadie.
   cli(
     [
       'project', 'set',
@@ -181,7 +183,7 @@ step('mensajeria-api: tareas normales, con handoff', () => {
       '--space-id', TABLERO.space.id, '--space-name', TABLERO.space.name,
       '--folder-id', TABLERO.mensajeria.folder.id, '--folder-name', TABLERO.mensajeria.folder.name,
       '--list-id', TABLERO.mensajeria.list.id, '--list-name', TABLERO.mensajeria.list.name,
-      '--handoff', 'true',
+      '--role', 'backend',
       '--status-todo', 'to do', '--status-in-progress', 'in progress',
       '--status-on-hold', 'on hold', '--status-handoff', 'update required',
       '--status-done', 'complete',
@@ -194,10 +196,17 @@ step('mensajeria-api: tareas normales, con handoff', () => {
   assert(out.includes('no se usa en este proyecto'), 'no debería tener paraguas');
   assert(out.includes('due_date` NO se usa'), 'debería prohibir due_date (default)');
   assert(out.includes('existe en el tablero'), 'no marca reviewed como no declarado');
+  assert(out.includes('Rol: **backend**'), 'no declara el rol');
+  assert(out.includes('NO parkees nada'), 'sin contraparte tiene que prohibir parkear');
 });
 
-step('db-gateway: paraguas + subtareas, fecha de fin en due_date', () => {
-  for (const [label, dir] of [['backend', P.backend], ['frontend', P.frontend]]) {
+step('db-gateway: paraguas + subtareas, y los dos roles con contraparte cruzada', () => {
+  // El caso completo: dos repos que son contraparte uno del otro, comparten lista y paraguas, y
+  // cada uno tiene su propio rol. Es lo que hace que el handoff reserve algo de verdad.
+  for (const [label, dir, otro] of [
+    ['backend', P.backend, P.frontend],
+    ['frontend', P.frontend, P.backend],
+  ]) {
     cli(
       [
         'project', 'set',
@@ -207,7 +216,7 @@ step('db-gateway: paraguas + subtareas, fecha de fin en due_date', () => {
         '--folder-id', TABLERO.gateway.folder.id, '--folder-name', TABLERO.gateway.folder.name,
         '--list-id', TABLERO.gateway.list.id, '--list-name', TABLERO.gateway.list.name,
         '--umbrella-task-id', TABLERO.gateway.umbrella,
-        '--handoff', 'true', '--naming', 'prefixed',
+        '--role', label, '--counterpart', otro, '--naming', 'prefixed',
         '--end-date-field', 'due_date',
         '--status-todo', 'to do', '--status-in-progress', 'in progress',
         '--status-on-hold', 'on hold', '--status-handoff', 'update required',
@@ -218,10 +227,22 @@ step('db-gateway: paraguas + subtareas, fecha de fin en due_date', () => {
       dir,
     );
   }
-  const out = cli(['context', '--cwd', P.backend], P.backend);
-  assert(out.includes(TABLERO.gateway.umbrella), 'no trae el paraguas');
-  assert(out.includes('parent:'), 'no exige parent');
-  assert(out.includes('la fecha de fin va en `due_date`'), 'no aplicó el override');
+  const be = cli(['context', '--cwd', P.backend], P.backend);
+  assert(be.includes(TABLERO.gateway.umbrella), 'no trae el paraguas');
+  assert(be.includes('parent:'), 'no exige parent');
+  assert(be.includes('la fecha de fin va en `due_date`'), 'no aplicó el override');
+  assert(be.includes('Rol: **backend**'), 'el backend no declara su rol');
+  assert(!be.includes('NO parkees nada'), 'CON contraparte no debería prohibir parkear');
+
+  // Y el frontend, del otro lado de la misma cadena.
+  const fe = cli(['context', '--cwd', P.frontend], P.frontend);
+  assert(fe.includes('Rol: **frontend**'), 'el frontend no declara su rol');
+  assert(fe.includes('final de la cadena'), 'el frontend debería cerrar la cadena');
+  assert(
+    /bandeja de entrada es `update required`, no `to do`/.test(fe),
+    'el frontend no sabe cuál es su bandeja',
+  );
+  assert(fe.includes('exista o no'), 'el frontend no sabe que puede pedirle trabajo al backend');
 });
 
 step('los dos repos del gateway comparten lista y paraguas, a propósito', () => {
