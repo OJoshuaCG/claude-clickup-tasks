@@ -1,0 +1,26 @@
+# Dependencias. El proyecto no tiene ninguna a propósito (ver README), pero si alguien
+# agrega una herramienta de desarrollo, su carpeta no va al repo.
+node_modules/
+
+# Respaldos que dejan los scripts de mutación y de parcheo durante el desarrollo.
+*.bak
+*.mutbak
+*.tmp-*
+
+# Basura del sistema operativo.
+.DS_Store
+Thumbs.db
+desktop.ini
+
+# Los suites crean sandboxes en el temp del sistema y los borran al terminar; si un suite
+# FALLA conserva el suyo a propósito, para poder inspeccionarlo. Nunca dentro del repo,
+# pero se ignoran por si alguien corre un test con el cwd acá.
+clickup-flow-test-*/
+clickup-ciclo-*/
+clickup-flujo-*/
+cf-adv-*/
+
+# Valores REALES del tablero para migrar (ids, emails del equipo). Nunca al repositorio:
+# el README lleva solo ejemplos ficticios. Este archivo es para tu máquina.
+MIGRACION.local.md
+*.local.md
