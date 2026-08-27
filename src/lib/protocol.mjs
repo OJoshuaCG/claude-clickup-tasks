@@ -72,7 +72,7 @@ export function buildContext(config, cwd) {
     },
     statuses: effectiveStatuses(entry),
     // Rol + contraparte: deciden la dirección de las entregas y cuál es la bandeja de entrada.
-    roleBehaviour: roleBehaviour(entry),
+    roleBehaviour: roleBehaviour(entry, config),
     cli: cliInvocation(config),
     today: today(),
     // Con la ventana en 0 (sin límite) no hay fecha de corte: el renderer omite el filtro.
@@ -198,6 +198,19 @@ export function renderContext(ctx) {
       out.push(
         `Al cerrar podés dejar la tarea en \`${st.handoff}\` para que la tome \`${rb.counterpart}\`. ` +
           'Ese estado significa **una sola cosa**: falta el otro rol.',
+      );
+    } else if (rb.counterpartProblem) {
+      // Hay contraparte declarada pero NO puede recibir. Decir "no hay contraparte" sería falso,
+      // y el agente necesita el motivo real para poder informarlo al usuario.
+      out.push(
+        `⚠️ **NO parkees nada en \`${st.handoff}\`.** Hay una contraparte declarada ` +
+          `(\`${rb.counterpart}\`) pero **${rb.counterpartProblem}**.`,
+      );
+      out.push('');
+      out.push(
+        'Mientras siga así, la tarea que dejaras ahí quedaría esperando a nadie con la apariencia ' +
+          `de haber sido entregada. Cerrá en \`${st.done}\`, y avisale al usuario del desajuste: ` +
+          'se arregla con `/clickup-setup` en el proyecto de la contraparte.',
       );
     } else {
       out.push(

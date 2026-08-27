@@ -406,7 +406,7 @@ check('project set (modo umbrella) con paraguas', () => {
       '--space-id', '2000000001', '--space-name', 'Acme',
       '--list-id', '4000000002', '--list-name', 'Gateway',
       '--umbrella-task-id', '86abc0001',
-      '--role', 'backend', '--counterpart', projectA,
+      '--role', 'backend',
       '--naming', 'prefixed',
       '--cwd', projectB,
     ],
@@ -464,6 +464,16 @@ check('project set valida el rol y guarda la contraparte', () => {
 });
 
 check('el rol y la contraparte se guardan y se ven en status', () => {
+  // Los DOS lados, consistentes: roles complementarios y la MISMA lista.
+  //
+  // Una contraparte solo *declarada* no alcanza. Si el otro proyecto no está registrado, es
+  // fullstack, está excluido, tiene el mismo rol o mira otra lista, no puede RECIBIR — y el
+  // protocolo degrada a propósito para no parkear tareas que nadie va a levantar.
+  cli(
+    ['project', 'set', '--mode', 'tasks', '--list-id', '901708300008', '--role', 'frontend',
+     '--counterpart', projRol2, '--cwd', projRol],
+    { cwd: projRol },
+  );
   cli(
     ['project', 'set', '--mode', 'tasks', '--list-id', '901708300008', '--role', 'backend',
      '--counterpart', projRol, '--cwd', projRol2],
@@ -892,7 +902,7 @@ check('un proyecto puede overridear end_date_field sin afectar a los demás', ()
       '--space-id', '2000000001',
       '--list-id', '4000000002',
       '--umbrella-task-id', '86abc0001',
-      '--role', 'backend', '--counterpart', projectA,
+      '--role', 'backend',
       '--end-date-field', 'due_date',
       '--search-window-days', '15',
       '--cwd', projectB,
@@ -980,7 +990,7 @@ check('doctor cuenta los estados sin confirmar como aviso, no como problema', ()
 check('captura los estados reales de un tablero en inglés', () => {
   cli(
     [
-      'project', 'set', '--mode', 'tasks', '--list-id', '4000000001', '--role', 'backend', '--counterpart', projectB,
+      'project', 'set', '--mode', 'tasks', '--list-id', '4000000001', '--role', 'backend',
       '--status-todo', 'to do',
       '--status-in-progress', 'in progress',
       '--status-on-hold', 'on hold',

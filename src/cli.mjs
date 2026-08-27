@@ -378,7 +378,7 @@ function cmdStatus(args) {
     lines.push(`espacio         ${p.space_name ?? '—'} (${p.space_id ?? '—'})`);
     lines.push(`lista           ${p.list_name ?? '—'} (${p.list_id ?? '—'})`);
     if (p.mode === MODES.UMBRELLA) lines.push(`paraguas        ${p.umbrella_task_id ?? '— FALTA'}`);
-    const rb = roleBehaviour(p);
+    const rb = roleBehaviour(p, config);
     lines.push(`rol             ${rb.role}${rb.counterpart ? ` · contraparte ${rb.counterpart}` : ' · sin contraparte'}`);
     lines.push(
       `entrega         ${rb.canHandoff ? 'puede parkear para la contraparte' : 'cierra la cadena'}` +
@@ -1258,6 +1258,38 @@ function cmdDoctor() {
         lines.push(`                ⚠ ${key}: sin list_id`);
         problems++;
       }
+      // Una contraparte que no puede RECIBIR solo es un PROBLEMA para quien iba a entregarle.
+      //
+      // Para un `backend` es pérdida de trabajo: parkearía tareas creyendo que entregó y nadie
+      // las levantaría. Para un `frontend` es apenas informativo — nunca parkea, así que una
+      // contraparte rota no le cambia el comportamiento. Reportar las dos igual sería `doctor`
+      // gritando lobo, que es exactamente cómo se deja de leer.
+      if (p.mode !== MODES.EXCLUDED && p.counterpart) {
+        const rb = roleBehaviour(p, config);
+        if (rb.counterpartProblem && rb.role === ROLES.BACKEND) {
+          lines.push(`                ⚠ ${key}:`);
+          lines.push(`                  su contraparte \`${p.counterpart}\` ${rb.counterpartProblem}`);
+          lines.push(
+            '                  → mientras siga así CIERRA en vez de parkear (degradado a propósito)',
+          );
+          problems++;
+        } else if (rb.counterpartProblem) {
+          lines.push(
+            `                · ${key}: su contraparte \`${p.counterpart}\` ${rb.counterpartProblem}`,
+          );
+          lines.push(
+            `                  (informativo: un \`${rb.role}\` no parkea, así que no le cambia nada)`,
+          );
+          warnings++;
+        } else if (config.projects?.[p.counterpart]?.counterpart !== key) {
+          // Relación de un solo lado: puede ser deliberada, pero conviene saberlo.
+          lines.push(
+            `                · ${key}: su contraparte \`${p.counterpart}\` no lo declara de vuelta`,
+          );
+          warnings++;
+        }
+      }
+
       if (p.mode !== MODES.EXCLUDED && !p.statuses) {
         // A warning, not a problem: the fallback names are right for many boards, so this works
         // as-is. But when a space renames its statuses, this is the line that explains why every

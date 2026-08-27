@@ -160,11 +160,49 @@ check('un BACKEND sin contraparte recibe la ADVERTENCIA de no parkear', () => {
   assert(out.includes('esperando a nadie'), 'no explica la consecuencia');
   assert(out.includes('siempre'), 'no dice que cierra siempre');
 
-  // Y con contraparte, la advertencia desaparece y aparece el handoff.
-  const con = PR.renderContext(
-    ctxFor({ mode: 'tasks', list_id: '1', role: 'backend', counterpart: '/a/fe' }),
-  );
-  assert(!con.includes('NO parkees nada'), 'advierte incluso con contraparte');
+  // Y con una contraparte REGISTRADA Y USABLE, la advertencia desaparece.
+  //
+  // "Declarada" no alcanza: si el otro proyecto no está en el registro, o es fullstack, o mira
+  // otra lista, no puede recibir — y el protocolo tiene que seguir prohibiendo parkear.
+  const cfg = C.defaultConfig();
+  cfg.identity.clickup_user_id = '5000000001';
+  cfg.identity.confirmed = true;
+  const be = '/tmp/adv-be2';
+  const fe = '/tmp/adv-fe2';
+  cfg.projects = {
+    [fe]: { path: fe, mode: 'tasks', role: 'frontend', counterpart: be, list_id: '1' },
+    [be]: { path: be, name: 'be', mode: 'tasks', role: 'backend', counterpart: fe, list_id: '1' },
+  };
+  const con = PR.renderContext(PR.buildContext(cfg, be));
+  assert(!con.includes('NO parkees nada'), 'advierte con una contraparte que sí puede recibir');
+  assert(con.includes(fe), 'no nombra la contraparte');
+});
+
+check('una contraparte que no puede recibir se explica con el motivo REAL', () => {
+  // Decir "no hay contraparte registrada" cuando SÍ hay una es mentirle al agente, y el agente
+  // necesita el motivo concreto para poder informarle al usuario qué arreglar.
+  const cfg = C.defaultConfig();
+  cfg.identity.clickup_user_id = '5000000001';
+  cfg.identity.confirmed = true;
+  const key = '/tmp/adv-be';
+  cfg.projects = {
+    '/tmp/adv-fe': { path: '/tmp/adv-fe', mode: 'tasks', role: 'fullstack', list_id: '1' },
+    [key]: {
+      path: key,
+      name: 'be',
+      mode: 'tasks',
+      role: 'backend',
+      counterpart: '/tmp/adv-fe',
+      list_id: '1',
+    },
+  };
+  const out = PR.renderContext(PR.buildContext(cfg, key));
+
+  assert(out.includes('NO parkees nada'), 'no prohíbe parkear');
+  assert(out.includes('Hay una contraparte declarada'), 'niega que exista la contraparte');
+  assert(out.includes('no mira el estado de handoff'), 'no da el motivo real');
+  assert(!out.includes('NO hay contraparte registrada'), 'sigue diciendo que no hay ninguna');
+  assert(out.includes('avisale al usuario'), 'no manda informar el desajuste');
 });
 
 check('el FRONTEND sabe que su bandeja NO es `to do`', () => {

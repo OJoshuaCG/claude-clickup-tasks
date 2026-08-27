@@ -80,13 +80,13 @@ Y dos más que conviene leer antes de contestar: **dónde va la fecha de fin** (
 
 ### Plataformas probadas
 
-Los diez suites (376 tests) corren y pasan en las dos, y la instalación completa
+Los diez suites (380 tests) corren y pasan en las dos, y la instalación completa
 —instalar → configurar → candado → desinstalar— se ejecutó de verdad en cada una:
 
 | | Estado |
 | --- | --- |
-| **Linux / WSL2** (node 22.22) | ✅ 376/376 · `install.sh` end-to-end |
-| **Windows 11** (node 22.13, PowerShell 5.1) | ✅ 376/376 · `install.ps1` end-to-end |
+| **Linux / WSL2** (node 22.22) | ✅ 380/380 · `install.sh` end-to-end |
+| **Windows 11** (node 22.13, PowerShell 5.1) | ✅ 380/380 · `install.ps1` end-to-end |
 | macOS | Sin probar. No debería haber diferencia con Linux (mismo `install.sh`, mismo node), pero no está verificado |
 
 Detalles que Windows obliga a manejar y están cubiertos por tests:
@@ -120,7 +120,7 @@ tres entradas propias en vez de acumularlas. Está cubierto por tests: el suite 
 que después de instalar, reinstalar y desinstalar **no falte nada de lo que había**.
 
 ```bash
-npm test                  # 376 tests, en un CLAUDE_CONFIG_DIR desechable
+npm test                  # 380 tests, en un CLAUDE_CONFIG_DIR desechable
 npm run test:adversarial   # solo las auditorías adversariales
 ```
 

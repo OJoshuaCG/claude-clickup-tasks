@@ -16,6 +16,12 @@ import { configPath, toolHome, canonicalProjectKey } from './paths.mjs';
 export const CONFIG_VERSION = 1;
 
 /** Modes a project can be in. `excluded` is a real, recorded answer — not the absence of one. */
+export const MODES = Object.freeze({
+  TASKS: 'tasks', // several normal tasks in a list (mensajeria-style)
+  UMBRELLA: 'umbrella', // one parent task, work happens in subtasks (frontend/backend-style)
+  EXCLUDED: 'excluded', // the user said no. Recorded so we never ask again.
+});
+
 /**
  * El ROL de un proyecto dentro de la cadena de entrega.
  *
@@ -46,23 +52,51 @@ export const ROLES = Object.freeze({
  *   el pedido es a una persona, no a un repositorio: una tarea en `on hold` con un pedido escrito
  *   la encuentra cualquiera, no hace falta que nadie vigile un filtro.
  */
-export function roleBehaviour(entry) {
+export function roleBehaviour(entry, config = null) {
   const role = [ROLES.BACKEND, ROLES.FRONTEND, ROLES.FULLSTACK].includes(entry?.role)
     ? entry.role
     : ROLES.FULLSTACK;
   const counterpart = entry?.counterpart || null;
+
+  // Una contraparte declarada no basta: tiene que poder RECIBIR.
+  //
+  // Si `be` declara a `fe` como contraparte pero `fe` es fullstack, o está excluido, o mira otra
+  // lista, entonces `be` parkea tareas que nadie va a levantar. Es el mismo fallo que el modelo
+  // de rol vino a evitar, un nivel más arriba: la herramienta cree que entregó y en realidad
+  // perdió la tarea.
+  //
+  // Cuando se pasa el config, la contraparte se VALIDA y `canHandoff` degrada solo. Sin config
+  // (llamadas sueltas, tests unitarios) se confía en lo declarado.
+  let counterpartProblem = null;
+  if (counterpart && config) {
+    const otro = config.projects?.[counterpart];
+    if (!otro) {
+      counterpartProblem = 'no está registrada';
+    } else if (otro.mode === MODES.EXCLUDED) {
+      counterpartProblem = 'está EXCLUIDA de ClickUp: no gestiona tareas';
+    } else if (otro.role === ROLES.FULLSTACK || !otro.role) {
+      counterpartProblem = `es \`${otro.role || 'fullstack'}\`: no mira el estado de handoff`;
+    } else if (otro.role === role) {
+      counterpartProblem = `tiene el MISMO rol (\`${role}\`): nadie recibe la entrega`;
+    } else if (entry.list_id && otro.list_id && entry.list_id !== otro.list_id) {
+      counterpartProblem =
+        `mira otra lista (\`${otro.list_id}\` vs \`${entry.list_id}\`): el handoff ocurre sobre ` +
+        'la MISMA tarea, así que en listas distintas no llega nunca';
+    }
+  }
 
   switch (role) {
     case ROLES.BACKEND:
       return {
         role,
         counterpart,
-        // Solo con contraparte: si no hay frontend registrado, parkear pierde la tarea.
-        canHandoff: Boolean(counterpart),
+        // Contraparte declarada Y usable: si no puede recibir, parkear pierde la tarea.
+        canHandoff: Boolean(counterpart) && !counterpartProblem,
+        counterpartProblem,
         // Su bandeja es el backlog más los pedidos que le dejó el otro lado.
         inbox: 'todo',
         canRequestFromOther: false,
-        closesChain: !counterpart,
+        closesChain: !counterpart || Boolean(counterpartProblem),
       };
     case ROLES.FRONTEND:
       return {
@@ -75,24 +109,21 @@ export function roleBehaviour(entry) {
         // Opción (b): puede pedirle trabajo al backend exista o no su repo.
         canRequestFromOther: true,
         closesChain: true,
+        counterpartProblem,
       };
     default:
       return {
         role: ROLES.FULLSTACK,
+        // Un fullstack no tiene contraparte por definición: hace las dos puntas.
         counterpart: null,
         canHandoff: false,
         inbox: 'todo',
         canRequestFromOther: false,
         closesChain: true,
+        counterpartProblem: null,
       };
   }
 }
-
-export const MODES = Object.freeze({
-  TASKS: 'tasks', // several normal tasks in a list (mensajeria-style)
-  UMBRELLA: 'umbrella', // one parent task, work happens in subtasks (frontend/backend-style)
-  EXCLUDED: 'excluded', // the user said no. Recorded so we never ask again.
-});
 
 export function defaultConfig() {
   return {

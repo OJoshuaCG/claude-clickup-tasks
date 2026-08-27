@@ -358,6 +358,66 @@ check('un FRONTEND puede pedir trabajo al otro rol con o sin contraparte', () =>
   }
 });
 
+check('una contraparte que NO puede recibir degrada canHandoff sola', () => {
+  // El mismo fallo que el rol vino a evitar, un nivel más arriba: `be` declara a `fe` como
+  // contraparte, así que parkea — pero si `fe` es fullstack, está excluido o mira otra lista,
+  // nadie levanta esa tarea. `doctor` decía "todo en orden".
+  const cfg = C.defaultConfig();
+  cfg.projects = {
+    '/fe-ok': { mode: 'tasks', role: 'frontend', list_id: '1' },
+    '/fe-full': { mode: 'tasks', role: 'fullstack', list_id: '1' },
+    '/fe-sin-rol': { mode: 'tasks', list_id: '1' },
+    '/fe-excl': { mode: C.MODES.EXCLUDED },
+    '/be-mismo': { mode: 'tasks', role: 'backend', list_id: '1' },
+    '/fe-otra-lista': { mode: 'tasks', role: 'frontend', list_id: '99' },
+  };
+  const be = (counterpart) =>
+    C.roleBehaviour({ role: 'backend', counterpart, list_id: '1' }, cfg);
+
+  // El único caso sano.
+  const ok = be('/fe-ok');
+  assert(ok.canHandoff === true, 'una contraparte válida debería permitir parkear');
+  assert(ok.counterpartProblem === null, `reportó problema donde no hay: ${ok.counterpartProblem}`);
+
+  // Y todos los rotos, con su motivo.
+  for (const [cp, esperado] of [
+    ['/fe-full', 'no mira el estado de handoff'],
+    ['/fe-sin-rol', 'no mira el estado de handoff'],
+    ['/fe-excl', 'EXCLUIDA'],
+    ['/be-mismo', 'MISMO rol'],
+    ['/fe-otra-lista', 'otra lista'],
+    ['/no-registrada', 'no está registrada'],
+  ]) {
+    const rb = be(cp);
+    assert(rb.canHandoff === false, `dejó parkear hacia ${cp}`);
+    assert(rb.closesChain === true, `no cierra la cadena con ${cp} roto`);
+    assert(
+      (rb.counterpartProblem ?? '').includes(esperado),
+      `el motivo para ${cp} no menciona "${esperado}": ${rb.counterpartProblem}`,
+    );
+  }
+});
+
+check('sin config no se valida la contraparte: se confía en lo declarado', () => {
+  // Las llamadas sueltas (tests, usos internos) no tienen el registro completo a mano. Ahí no
+  // hay nada que validar, y asumir lo peor daría falsos negativos.
+  const rb = C.roleBehaviour({ role: 'backend', counterpart: '/algo' });
+  assert(rb.canHandoff === true, 'sin config debería confiar en lo declarado');
+  assert(rb.counterpartProblem === null, 'inventó un problema sin poder verificarlo');
+});
+
+check('el contrato de retorno es el mismo para los tres roles', () => {
+  // `counterpartProblem` faltaba en la rama fullstack: un consumidor que lo leyera recibía
+  // `undefined` en vez de `null`, que es una distinción que nadie quiere depurar.
+  const claves = ['role', 'counterpart', 'canHandoff', 'inbox', 'canRequestFromOther', 'closesChain', 'counterpartProblem'];
+  for (const role of ['backend', 'frontend', 'fullstack']) {
+    const rb = C.roleBehaviour({ role });
+    for (const k of claves) {
+      assert(k in rb, `el rol ${role} no devuelve "${k}"`);
+    }
+  }
+});
+
 check('la bandeja de entrada depende del rol', () => {
   assert(C.roleBehaviour({ role: 'backend' }).inbox === 'todo', 'backend mira el backlog');
   assert(
