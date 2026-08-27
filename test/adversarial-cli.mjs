@@ -189,13 +189,49 @@ check('team add rechaza ids no numéricos', () => {
   }
 });
 
-check('project set exige list-id y un modo válido', () => {
-  assert(run(['project', 'set', '--mode', 'tasks', '--cwd', proj]).code === 1, 'aceptó sin list-id');
-  assert(run(['project', 'set', '--list-id', '1', '--cwd', proj]).code === 1, 'aceptó sin modo');
+check('project set exige list-id la PRIMERA vez, y un modo válido', () => {
+  // Directorio virgen: `--list-id` solo es obligatorio cuando el proyecto todavía no tiene lista.
+  // En una reconfiguración parcial no hay que repetir lo que ya está guardado.
+  const virgen = path.join(sandbox, 'proyecto-virgen');
+  fs.mkdirSync(virgen, { recursive: true });
+
+  assert(run(['project', 'set', '--mode', 'tasks', '--cwd', virgen]).code === 1, 'aceptó sin list-id');
+  assert(run(['project', 'set', '--list-id', '1', '--cwd', virgen]).code === 1, 'aceptó sin modo');
   assert(
-    run(['project', 'set', '--mode', 'excluded', '--list-id', '1', '--cwd', proj]).code === 1,
+    run(['project', 'set', '--mode', 'excluded', '--list-id', '1', '--cwd', virgen]).code === 1,
     'aceptó "excluded" como modo (para eso está project exclude)',
   );
+});
+
+check('una reconfiguración parcial NO borra lo que no se repite', () => {
+  // Bug real: el patch incluía todos los campos con `null` donde faltaba el flag, y
+  // `{...previo, ...patch}` los borraba. Cambiar el rol vaciaba espacio, carpeta y nombres.
+  const p = path.join(sandbox, 'proyecto-parcial');
+  fs.mkdirSync(p, { recursive: true });
+  run([
+    'project', 'set', '--mode', 'tasks', '--list-id', '4000000001', '--list-name', 'Lista Uno',
+    '--space-id', '2000000001', '--space-name', 'Espacio Uno', '--folder-id', '3000000001',
+    '--cwd', p,
+  ]);
+  // Segunda pasada: solo el rol.
+  const r = run(['project', 'set', '--mode', 'tasks', '--role', 'backend', '--cwd', p]);
+  assert(r.code === 0, `la reconfiguración parcial falló: ${r.stderr}`);
+
+  const out = run(['project', 'show', '--cwd', p]).stdout;
+  for (const esperado of ['Lista Uno', 'Espacio Uno', '3000000001', '4000000001', '2000000001']) {
+    assert(out.includes(esperado), `perdió "${esperado}" al cambiar solo el rol:\n${out}`);
+  }
+  assert(out.includes('"role": "backend"'), 'no aplicó el rol nuevo');
+});
+
+check('--handoff se rechaza explicando que lo reemplazó --role', () => {
+  // Ignorar un flag en silencio es peor que fallar: quien lo pasa cree que configuró algo.
+  const p = path.join(sandbox, 'proyecto-handoff');
+  fs.mkdirSync(p, { recursive: true });
+  const r = run(['project', 'set', '--mode', 'tasks', '--list-id', '1', '--handoff', 'true', '--cwd', p]);
+  assert(r.code === 1, 'aceptó --handoff en silencio');
+  assert(r.stderr.includes('--role'), 'no dice qué usar en su lugar');
+  assert(r.stderr.includes('DIRECCIÓN'), 'no explica por qué el booleano no alcanzaba');
 });
 
 check('claim exige task-id', () => {

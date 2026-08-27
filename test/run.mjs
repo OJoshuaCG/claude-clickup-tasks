@@ -63,8 +63,10 @@ const projectA = path.join(sandbox, 'proyecto-tasks');
 const projectB = path.join(sandbox, 'proyecto-umbrella');
 const projectC = path.join(sandbox, 'proyecto-excluido');
 const projectD = path.join(sandbox, 'proyecto-sin-configurar');
+const projRol = path.join(sandbox, 'proyecto-rol');
+const projRol2 = path.join(sandbox, 'proyecto-rol-2');
 
-for (const dir of [fakeClaude, projectA, projectB, projectC, projectD]) {
+for (const dir of [fakeClaude, projectA, projectB, projectC, projectD, projRol, projRol2]) {
   fs.mkdirSync(dir, { recursive: true });
 }
 fs.mkdirSync(path.join(projectA, 'src', 'deep'), { recursive: true });
@@ -404,7 +406,7 @@ check('project set (modo umbrella) con paraguas', () => {
       '--space-id', '2000000001', '--space-name', 'Acme',
       '--list-id', '4000000002', '--list-name', 'Gateway',
       '--umbrella-task-id', '86abc0001',
-      '--handoff', 'true',
+      '--role', 'backend', '--counterpart', projectA,
       '--naming', 'prefixed',
       '--cwd', projectB,
     ],
@@ -413,8 +415,92 @@ check('project set (modo umbrella) con paraguas', () => {
   const entry = Object.values(readConfig().projects).find((p) => p.name === 'Proyecto Umbrella');
   assertEqual(entry.mode, 'umbrella', 'modo');
   assertEqual(entry.umbrella_task_id, '86abc0001', 'paraguas');
-  assertEqual(entry.handoff, true, 'handoff');
+  assertEqual(entry.role, 'backend', 'rol');
+  assertEqual(entry.handoff, true, 'handoff derivado');
   assertEqual(entry.naming, 'prefixed', 'naming');
+});
+
+check('project set valida el rol y guarda la contraparte', () => {
+  // Rol inválido: falla explicando las tres opciones.
+  let threw = false;
+  try {
+    cli(['project', 'set', '--mode', 'tasks', '--list-id', '1', '--role', 'inventado', '--cwd', projRol], {
+      cwd: projRol,
+    });
+  } catch (err) {
+    threw = true;
+    const msg = err.stderr?.toString() ?? '';
+    assert(msg.includes('backend'), 'no lista los roles válidos');
+    assert(msg.includes('fullstack'), 'no menciona fullstack');
+  }
+  assert(threw, 'aceptó un rol inválido');
+
+  // Un fullstack no puede tener contraparte: hace las dos puntas.
+  let threw2 = false;
+  try {
+    cli(
+      ['project', 'set', '--mode', 'tasks', '--list-id', '1', '--role', 'fullstack',
+       '--counterpart', projRol2, '--cwd', projRol],
+      { cwd: projRol },
+    );
+  } catch (err) {
+    threw2 = true;
+    assert((err.stderr?.toString() ?? '').includes('no tiene contraparte'), 'no explica por qué');
+  }
+  assert(threw2, 'aceptó contraparte en un fullstack');
+
+  // Y no puede ser sí misma.
+  let threw3 = false;
+  try {
+    cli(
+      ['project', 'set', '--mode', 'tasks', '--list-id', '1', '--role', 'backend',
+       '--counterpart', projRol, '--cwd', projRol],
+      { cwd: projRol },
+    );
+  } catch {
+    threw3 = true;
+  }
+  assert(threw3, 'aceptó ser su propia contraparte');
+});
+
+check('el rol y la contraparte se guardan y se ven en status', () => {
+  cli(
+    ['project', 'set', '--mode', 'tasks', '--list-id', '901708300008', '--role', 'backend',
+     '--counterpart', projRol, '--cwd', projRol2],
+    { cwd: projRol2 },
+  );
+  const entry = readConfig().projects[canonicalProjectKey(projRol2)];
+  assert(entry.role === 'backend', `rol guardado: ${entry.role}`);
+  assert(entry.counterpart === canonicalProjectKey(projRol), 'no guardó la contraparte');
+  assert(entry.handoff === true, 'handoff derivado del rol quedó mal');
+
+  const st = cli(['status', '--cwd', projRol2], { cwd: projRol2 });
+  assert(st.includes('rol             backend'), `status no muestra el rol:\n${st}`);
+  assert(st.includes('contraparte'), 'status no muestra la contraparte');
+  assert(st.includes('puede parkear'), 'status no dice qué puede hacer al entregar');
+});
+
+check('un backend sin contraparte: status dice que cierra la cadena', () => {
+  // `none` limpia la contraparte que puso el test anterior: omitir el flag la conservaría.
+  cli(
+    ['project', 'set', '--mode', 'tasks', '--list-id', '901708300008', '--role', 'backend',
+     '--counterpart', 'none', '--cwd', projRol2],
+    { cwd: projRol2 },
+  );
+  const st = cli(['status', '--cwd', projRol2], { cwd: projRol2 });
+  assert(st.includes('sin contraparte'), 'no informa que falta la contraparte');
+  assert(st.includes('cierra la cadena'), 'no dice que cierra en vez de parkear');
+});
+
+check('avisa cuando la contraparte no está registrada, pero la guarda', () => {
+  const out = cli(
+    ['project', 'set', '--mode', 'tasks', '--list-id', '1', '--role', 'frontend',
+     '--counterpart', '/no/registrado/todavia', '--cwd', projRol],
+    { cwd: projRol },
+  );
+  assert(out.includes('no está registrada'), 'no avisa que la contraparte falta');
+  const entry = readConfig().projects[canonicalProjectKey(projRol)];
+  assert(entry.counterpart === '/no/registrado/todavia', 'no la guardó igual');
 });
 
 check('project exclude se registra con motivo', () => {
@@ -806,7 +892,7 @@ check('un proyecto puede overridear end_date_field sin afectar a los demás', ()
       '--space-id', '2000000001',
       '--list-id', '4000000002',
       '--umbrella-task-id', '86abc0001',
-      '--handoff', 'true',
+      '--role', 'backend', '--counterpart', projectA,
       '--end-date-field', 'due_date',
       '--search-window-days', '15',
       '--cwd', projectB,
@@ -894,7 +980,7 @@ check('doctor cuenta los estados sin confirmar como aviso, no como problema', ()
 check('captura los estados reales de un tablero en inglés', () => {
   cli(
     [
-      'project', 'set', '--mode', 'tasks', '--list-id', '4000000001', '--handoff', 'true',
+      'project', 'set', '--mode', 'tasks', '--list-id', '4000000001', '--role', 'backend', '--counterpart', projectB,
       '--status-todo', 'to do',
       '--status-in-progress', 'in progress',
       '--status-on-hold', 'on hold',

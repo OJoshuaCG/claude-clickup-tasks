@@ -24,6 +24,8 @@ import process from 'node:process';
 import { canonicalProjectKey, configPath, toolHome, statePath } from './lib/paths.mjs';
 import {
   MODES,
+  ROLES,
+  roleBehaviour,
   OVERRIDABLE,
   STATUS_ROLES,
   loadConfig,
@@ -376,7 +378,12 @@ function cmdStatus(args) {
     lines.push(`espacio         ${p.space_name ?? '—'} (${p.space_id ?? '—'})`);
     lines.push(`lista           ${p.list_name ?? '—'} (${p.list_id ?? '—'})`);
     if (p.mode === MODES.UMBRELLA) lines.push(`paraguas        ${p.umbrella_task_id ?? '— FALTA'}`);
-    lines.push(`handoff         ${p.handoff ? 'sí' : 'no'}`);
+    const rb = roleBehaviour(p);
+    lines.push(`rol             ${rb.role}${rb.counterpart ? ` · contraparte ${rb.counterpart}` : ' · sin contraparte'}`);
+    lines.push(
+      `entrega         ${rb.canHandoff ? 'puede parkear para la contraparte' : 'cierra la cadena'}` +
+        `${rb.canRequestFromOther ? ' · puede pedir trabajo al otro rol' : ''}`,
+    );
   }
   lines.push(
     `identidad       ${
@@ -779,11 +786,27 @@ function cmdProject(args) {
       err(`--mode tiene que ser "${MODES.TASKS}" o "${MODES.UMBRELLA}" (para excluir: project exclude).`);
       return 1;
     }
-    if (!args['list-id']) {
+    // Obligatorio solo si el proyecto no tiene ya una lista: en una reconfiguración parcial
+    // (cambiar el rol, por ejemplo) no hay que repetir lo que ya está guardado.
+    const listaPrevia = config.projects?.[cwd]?.list_id;
+    if (!args['list-id'] && !listaPrevia) {
       err('Falta --list-id: es donde se crean las tareas. Sin eso el protocolo no puede operar.');
       return 1;
     }
-    if (mode === MODES.UMBRELLA && !args['umbrella-task-id']) {
+
+    // `--handoff` quedó reemplazado por `--role`, que además tiene DIRECCIÓN. Ignorarlo en
+    // silencio sería peor que fallar: quien lo pase cree que configuró algo que no configuró.
+    if (args.handoff !== undefined) {
+      err(
+        '--handoff ya no existe: fue reemplazado por --role, que además dice la DIRECCIÓN de la\n' +
+          'entrega.\n\n' +
+          '  --role backend    entrega hacia adelante (con --counterpart, puede parkear)\n' +
+          '  --role frontend   consume lo que el otro dejó listo; cierra la cadena\n' +
+          '  --role fullstack  hace las dos puntas; sin entregas entre proyectos',
+      );
+      return 1;
+    }
+    if (mode === MODES.UMBRELLA && !args['umbrella-task-id'] && !config.projects?.[cwd]?.umbrella_task_id) {
       err(
         'El modo "umbrella" necesita --umbrella-task-id: la tarea principal de la que cuelgan las ' +
           'subtareas. Si no existe todavía, creala en ClickUp primero.',
@@ -791,20 +814,89 @@ function cmdProject(args) {
       return 1;
     }
 
-    const patch = {
-      mode,
-      name: args.name ? String(args.name) : path.basename(cwd),
-      workspace_id: args['workspace-id'] ? String(args['workspace-id']) : config.defaults.workspace_id,
-      space_id: args['space-id'] ? String(args['space-id']) : null,
-      space_name: args['space-name'] ? String(args['space-name']) : null,
-      folder_id: args['folder-id'] ? String(args['folder-id']) : null,
-      folder_name: args['folder-name'] ? String(args['folder-name']) : null,
-      list_id: String(args['list-id']),
-      list_name: args['list-name'] ? String(args['list-name']) : null,
-      umbrella_task_id: args['umbrella-task-id'] ? String(args['umbrella-task-id']) : null,
-      handoff: truthy(args.handoff, false),
-      naming: args.naming === 'prefixed' ? 'prefixed' : 'descriptive',
+    // El ROL decide la dirección de las entregas. Sin rol el protocolo no puede saber si al
+    // cerrar hay que parkear para otro o cerrar del todo, ni cuál es la bandeja de entrada.
+    const roleArg = args.role === undefined ? ROLES.FULLSTACK : String(args.role).trim();
+    const role = roleArg;
+    if (![ROLES.BACKEND, ROLES.FRONTEND, ROLES.FULLSTACK].includes(role)) {
+      err(
+        `--role: "${ROLES.BACKEND}" | "${ROLES.FRONTEND}" | "${ROLES.FULLSTACK}". Llegó "${roleArg}".\n\n` +
+          `  ${ROLES.BACKEND}    entrega hacia adelante; su bandeja es el backlog\n` +
+          `  ${ROLES.FRONTEND}   consume lo que el backend dejó listo; cierra la cadena\n` +
+          `  ${ROLES.FULLSTACK}  hace las dos puntas; no hay entregas entre proyectos`,
+      );
+      return 1;
+    }
+
+    // La contraparte es lo que evita la tarea que espera a nadie: un backend sin frontend
+    // registrado NO puede parkear en el estado de handoff (ver roleBehaviour en config.mjs).
+    const limpiaContraparte =
+      args.counterpart !== undefined &&
+      ['none', ''].includes(String(args.counterpart).trim().toLowerCase());
+    if (args.counterpart && !limpiaContraparte) {
+      const cp = canonicalProjectKey(args.counterpart);
+      if (cp === cwd) {
+        err('--counterpart no puede ser este mismo proyecto.');
+        return 1;
+      }
+      if (role === ROLES.FULLSTACK) {
+        err(
+          'Un proyecto `fullstack` no tiene contraparte: hace las dos puntas. Si entrega trabajo a ' +
+            'otro repositorio, su rol es `backend` o `frontend`.',
+        );
+        return 1;
+      }
+      if (!config.projects?.[cp]) {
+        say(
+          `⚠ La contraparte \`${cp}\` no está registrada todavía. Se guarda igual, pero hasta que ` +
+            'lo esté el protocolo no va a poder nombrarla ni verificar su rol.',
+        );
+      }
+    }
+
+    // Solo se incluyen los campos que el llamador PASÓ.
+    //
+    // La versión anterior armaba el patch completo, con `null` donde el flag faltaba, y
+    // `upsertProject` hace `{...previo, ...patch}`: un flag omitido BORRABA el valor guardado.
+    // Cambiar solo el rol de un proyecto le vaciaba el espacio, la carpeta y los nombres, en
+    // silencio. Y `/clickup-setup` propone justamente cambios parciales sobre un proyecto que ya
+    // funciona, así que era el camino más probable hacia la pérdida.
+    const previo = config.projects?.[cwd] ?? {};
+    const patch = { mode };
+
+    const asigna = (campo, flag, transformar = String) => {
+      if (args[flag] !== undefined) patch[campo] = transformar(args[flag]);
     };
+
+    asigna('name', 'name');
+    if (patch.name === undefined && previo.name === undefined) patch.name = path.basename(cwd);
+
+    asigna('workspace_id', 'workspace-id');
+    if (patch.workspace_id === undefined && previo.workspace_id === undefined) {
+      patch.workspace_id = config.defaults.workspace_id;
+    }
+
+    asigna('space_id', 'space-id');
+    asigna('space_name', 'space-name');
+    asigna('folder_id', 'folder-id');
+    asigna('folder_name', 'folder-name');
+    asigna('list_id', 'list-id');
+    asigna('list_name', 'list-name');
+    asigna('umbrella_task_id', 'umbrella-task-id');
+    // `none` (o vacío) LIMPIA la contraparte. Con la semántica de preservar, omitir el flag la
+    // conserva — así que sin una forma explícita de borrarla no habría manera de quitarla.
+    if (args.counterpart !== undefined) {
+      const v = String(args.counterpart).trim().toLowerCase();
+      patch.counterpart = v === 'none' || v === '' ? null : canonicalProjectKey(args.counterpart);
+    }
+    asigna('naming', 'naming', (v) => (v === 'prefixed' ? 'prefixed' : 'descriptive'));
+
+    // El rol siempre se escribe: su default (fullstack) es una decisión, no una ausencia — y de
+    // él se deriva `handoff`, que no puede quedar inconsistente.
+    patch.role = role;
+    patch.handoff = role !== ROLES.FULLSTACK;
+    // Un fullstack no tiene contraparte: si el rol cambió a fullstack, se limpia.
+    if (role === ROLES.FULLSTACK) patch.counterpart = null;
     // Re-registering a previously excluded project has to clear the exclusion, or `context`
     // would keep reporting "excluded" from the leftover fields.
     patch.excluded_reason = null;
@@ -1234,6 +1326,7 @@ Configuración
       set acepta, además de las coordenadas, overrides por proyecto:
       --use-dates --use-priorities --auto-assign --end-date-field --search-window-days
       y los nombres REALES de los estados del tablero:
+      --role backend|frontend|fullstack   --counterpart <ruta del otro proyecto>|none
       --status-todo --status-in-progress --status-on-hold --status-handoff --status-done
       --available-statuses "a|b|c"   (valida que los de arriba existan)
   identity show | set --id <numérico> [--email] [--name] [--confirmed]
