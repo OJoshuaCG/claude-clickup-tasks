@@ -641,12 +641,17 @@ function cmdIdentity(args) {
       );
       return 1;
     }
+    // `resolved_at` responde DESDE CUÁNDO esta identidad es la buena. Re-confirmar el mismo id
+    // no es una resolución nueva, así que volver a sellarlo borraría ese dato sin ganar nada.
+    const idNuevo = String(id).trim() !== String(config.identity.clickup_user_id ?? '');
     config.identity.clickup_user_id = String(id).trim();
     if (args.email) config.identity.clickup_email = String(args.email).trim();
     if (args.name) config.identity.clickup_username = String(args.name).trim();
     config.identity.confirmed = truthy(args.confirmed, true);
     config.identity.resolved_via = args.via ? String(args.via) : 'mcp';
-    config.identity.resolved_at = new Date().toISOString();
+    if (idNuevo || !config.identity.resolved_at) {
+      config.identity.resolved_at = new Date().toISOString();
+    }
     delete config.identity.pending_query;
 
     const email = gitEmail(canonicalProjectKey(args.cwd || process.cwd()));
@@ -724,7 +729,7 @@ function cmdTeam(args) {
     return 0;
   }
 
-  err(`Subcomando desconocido: team ${sub}`);
+  err(`Subcomando desconocido: team ${sub}. Usá list | add.`);
   return 1;
 }
 
@@ -771,10 +776,14 @@ function cmdProject(args) {
   }
 
   if (sub === 'exclude') {
+    // `excluded_at` responde DESDE CUÁNDO está excluido. Volver a excluir algo ya excluido no es
+    // una exclusión nueva: re-sellarlo perdería la fecha original sin aportar nada.
+    const yaExcluido = config.projects?.[cwd]?.mode === MODES.EXCLUDED;
+    const desde = yaExcluido ? config.projects[cwd].excluded_at : null;
     const entry = upsertProject(config, cwd, {
       mode: MODES.EXCLUDED,
       excluded_reason: args.reason ? String(args.reason) : 'el usuario eligió no usar ClickUp acá',
-      excluded_at: new Date().toISOString(),
+      excluded_at: desde || new Date().toISOString(),
     });
     saveConfig(config);
     dropState(cwd);
