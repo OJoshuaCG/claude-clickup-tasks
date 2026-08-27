@@ -11,7 +11,7 @@
 import fs from 'node:fs';
 import path from 'node:path';
 import { execFileSync } from 'node:child_process';
-import { configPath, toolHome, canonicalProjectKey } from './paths.mjs';
+import { configPath, toolHome, canonicalProjectKey, writeJsonAtomic } from './paths.mjs';
 
 export const CONFIG_VERSION = 1;
 
@@ -339,9 +339,7 @@ export function saveConfig(config) {
       }
     }
     salida.updated_at = new Date().toISOString();
-    const tmp = `${file}.tmp-${process.pid}`;
-    fs.writeFileSync(tmp, `${JSON.stringify(salida, null, 2)}\n`, 'utf8');
-    fs.renameSync(tmp, file);
+    writeJsonAtomic(file, salida);
     // El caller sigue teniendo su objeto en la mano y a veces imprime desde él: se sincroniza
     // con lo que realmente quedó escrito, para que no muestre algo distinto del archivo.
     if (salida !== config) {

@@ -10,7 +10,7 @@
 
 import fs from 'node:fs';
 import path from 'node:path';
-import { projectStateFile, statePath, canonicalProjectKey } from './paths.mjs';
+import { projectStateFile, statePath, canonicalProjectKey, writeJsonAtomic } from './paths.mjs';
 
 function emptyState() {
   return { claim: null, exemption: null };
@@ -38,10 +38,7 @@ function writeState(projectDir, state) {
     updated_at: new Date().toISOString(),
     ...state,
   };
-  const tmp = `${file}.tmp-${process.pid}`;
-  fs.writeFileSync(tmp, `${JSON.stringify(payload, null, 2)}\n`, 'utf8');
-  fs.renameSync(tmp, file);
-  return file;
+  return writeJsonAtomic(file, payload);
 }
 
 /**

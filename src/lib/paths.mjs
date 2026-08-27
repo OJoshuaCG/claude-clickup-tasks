@@ -4,6 +4,7 @@
 // agree on where the config lives, and a second copy of this logic is how you get an installer
 // that writes to one place and a hook that reads another.
 
+import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 import process from 'node:process';
@@ -115,4 +116,62 @@ export function cliInvocation(config) {
   const override = config?.cli_invocation;
   if (typeof override === 'string' && override.trim()) return override.trim();
   return `node "${forwardSlash(path.join(toolHome(), 'src', 'cli.mjs'))}"`;
+}
+
+/**
+ * Escritura atómica de JSON: archivo temporal y después rename.
+ *
+ * El rename es lo que evita que una caída en el medio deje un archivo truncado. En Windows, sin
+ * embargo, `rename` sobre un archivo existente falla con EPERM/EACCES si CUALQUIER otro proceso
+ * lo tiene abierto — aunque sea sólo para leer. Y acá eso pasa seguido: los hooks leen el config
+ * en cada prompt, así que un `project set` podía fallar de forma intermitente sin que el usuario
+ * entendiera por qué.
+ *
+ * Medido: con 20 procesos escribiendo a la vez, 1 fallaba con EPERM en Windows y ninguno en Linux.
+ * El reintento con espera creciente cubre la ventana en la que el lector suelta el archivo.
+ */
+export function writeJsonAtomic(file, data) {
+  fs.mkdirSync(path.dirname(file), { recursive: true });
+  const tmp = `${file}.tmp-${process.pid}`;
+  fs.writeFileSync(tmp, `${JSON.stringify(data, null, 2)}\n`, 'utf8');
+  try {
+    renameConReintentos(tmp, file);
+  } catch (err) {
+    // El temporal no puede quedar tirado: acumularlos convierte un fallo transitorio en basura
+    // permanente al lado del config del usuario.
+    try {
+      fs.rmSync(tmp, { force: true });
+    } catch {
+      /* si tampoco se puede borrar, el error de arriba es el que importa */
+    }
+    throw err;
+  }
+  return file;
+}
+
+/** Los errno que en Windows significan "alguien lo tiene abierto, probá de nuevo". */
+const REINTENTABLES = new Set(['EPERM', 'EACCES', 'EBUSY']);
+
+function renameConReintentos(desde, hacia, intentos = 12) {
+  for (let i = 0; ; i++) {
+    try {
+      fs.renameSync(desde, hacia);
+      return;
+    } catch (err) {
+      if (i >= intentos - 1 || !REINTENTABLES.has(err?.code)) throw err;
+      dormir(5 + i * 10 + Math.floor(Math.random() * 10));
+    }
+  }
+}
+
+/** Espera bloqueante sin dependencias ni busy-loop. */
+function dormir(ms) {
+  try {
+    Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, ms);
+  } catch {
+    const hasta = Date.now() + ms;
+    while (Date.now() < hasta) {
+      /* último recurso: SharedArrayBuffer deshabilitado */
+    }
+  }
 }

@@ -15,7 +15,7 @@
 
 import fs from 'node:fs';
 import path from 'node:path';
-import { settingsPath, backupsDir, forwardSlash } from './paths.mjs';
+import { settingsPath, backupsDir, forwardSlash, writeJsonAtomic } from './paths.mjs';
 
 /** Appears in every hook command we register. Both idempotency and uninstall key off it. */
 export const HOOK_MARKER = 'clickup-flow/src/cli.mjs';
@@ -97,12 +97,7 @@ function pruneBackups() {
 }
 
 export function writeSettings(settings) {
-  const file = settingsPath();
-  fs.mkdirSync(path.dirname(file), { recursive: true });
-  const tmp = `${file}.tmp-${process.pid}`;
-  fs.writeFileSync(tmp, `${JSON.stringify(settings, null, 2)}\n`, 'utf8');
-  fs.renameSync(tmp, file);
-  return file;
+  return writeJsonAtomic(settingsPath(), settings);
 }
 
 /** The three hooks the tool installs, as (event, matcher, command) triples. */
