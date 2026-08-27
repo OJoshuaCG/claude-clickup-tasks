@@ -257,9 +257,25 @@ async function cmdPromptHook() {
 // ---------------------------------------------------------------------------------------------
 
 /** Editing Claude's own configuration is not the shared product work the lock protects. */
-function isTrivialTarget(filePath) {
+/**
+ * Archivos que el candado nunca bloquea: la configuración de Claude Code y del propio flujo.
+ *
+ * La exención existe justamente para que la herramienta no se bloquee a sí misma — pedirle una
+ * tarea de ClickUp para poder escribir el CLAUDE.md que configura ClickUp es un círculo.
+ *
+ * Las comparaciones necesitan un separador delante (`/CLAUDE.md`, no `CLAUDE.md`) para no
+ * cazar `MI-CLAUDE.md`. Eso hacía que una ruta RELATIVA no matcheara nunca: con
+ * `file_path: "CLAUDE.md"` el guard bloqueaba, que es exactamente lo contrario de lo que la
+ * exención busca. Por eso la ruta se resuelve primero contra el directorio del hook.
+ */
+function isTrivialTarget(filePath, baseDir = null) {
   if (!filePath) return false;
-  const p = canonicalProjectKey(filePath);
+  const crudo = String(filePath);
+  const absoluto =
+    path.isAbsolute(crudo) || /^[A-Za-z]:[\\/]/.test(crudo)
+      ? crudo
+      : path.resolve(baseDir || process.cwd(), crudo);
+  const p = canonicalProjectKey(absoluto);
   return (
     p.includes('/.claude/') ||
     p.endsWith('/CLAUDE.md') ||
@@ -291,7 +307,7 @@ async function cmdGuard() {
   if (ctx.exemption.active) return 0; // a live, written-down exemption
 
   const file = targetPath(payload);
-  if (isTrivialTarget(file)) return 0; // configuring the tooling, not doing the work
+  if (isTrivialTarget(file, cwd)) return 0; // configuring the tooling, not doing the work
 
   // ---- fail closed ----
   if (ctx.exemption.expired) {
@@ -1446,6 +1462,27 @@ main()
       process.exit(0);
     }
 
-    err(`clickup-flow: ${error instanceof Error ? error.stack || error.message : String(error)}`);
+    // Un comando sí puede reportar la falla, pero no con un stack en la cara. El fallo típico
+    // acá no es un bug: es el disco, los permisos o un archivo en uso, y el usuario necesita
+    // saber QUÉ hacer, no en qué línea de qué módulo se cortó.
+    const codigo = error && typeof error === 'object' && 'code' in error ? String(error.code) : null;
+    err(`clickup-flow: ${message}`);
+    if (codigo === 'EACCES' || codigo === 'EPERM') {
+      err(
+        'Es un problema de permisos sobre el directorio de configuración de Claude Code. ' +
+          'Revisá quién es el dueño de esa carpeta (¿se instaló con sudo?).',
+      );
+    } else if (codigo === 'EBUSY' || codigo === 'ENOTEMPTY') {
+      err('Un archivo está en uso (antivirus, OneDrive, o un editor abierto ahí). Cerralo y reintentá.');
+    } else if (codigo === 'ENOSPC') {
+      err('No queda espacio en disco.');
+    } else if (codigo === 'EROFS') {
+      err('El sistema de archivos está montado como sólo lectura.');
+    }
+    if (process.env.CLICKUP_FLOW_DEBUG && error instanceof Error && error.stack) {
+      err(`\n${error.stack}`);
+    } else {
+      err('Detalle técnico: CLICKUP_FLOW_DEBUG=1 y volvé a correrlo.');
+    }
     process.exit(1);
   });
