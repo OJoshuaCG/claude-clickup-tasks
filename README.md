@@ -80,13 +80,13 @@ Y dos más que conviene leer antes de contestar: **dónde va la fecha de fin** (
 
 ### Plataformas probadas
 
-Los diez suites (357 tests) corren y pasan en las dos, y la instalación completa
+Los diez suites (376 tests) corren y pasan en las dos, y la instalación completa
 —instalar → configurar → candado → desinstalar— se ejecutó de verdad en cada una:
 
 | | Estado |
 | --- | --- |
-| **Linux / WSL2** (node 22.22) | ✅ 357/357 · `install.sh` end-to-end |
-| **Windows 11** (node 22.13, PowerShell 5.1) | ✅ 357/357 · `install.ps1` end-to-end |
+| **Linux / WSL2** (node 22.22) | ✅ 376/376 · `install.sh` end-to-end |
+| **Windows 11** (node 22.13, PowerShell 5.1) | ✅ 376/376 · `install.ps1` end-to-end |
 | macOS | Sin probar. No debería haber diferencia con Linux (mismo `install.sh`, mismo node), pero no está verificado |
 
 Detalles que Windows obliga a manejar y están cubiertos por tests:
@@ -120,7 +120,7 @@ tres entradas propias en vez de acumularlas. Está cubierto por tests: el suite 
 que después de instalar, reinstalar y desinstalar **no falte nada de lo que había**.
 
 ```bash
-npm test                  # 357 tests, en un CLAUDE_CONFIG_DIR desechable
+npm test                  # 376 tests, en un CLAUDE_CONFIG_DIR desechable
 npm run test:adversarial   # solo las auditorías adversariales
 ```
 
@@ -242,6 +242,59 @@ Se registra la respuesta ── incluida la exclusión, que también se guarda
 
 Un proyecto excluido no vuelve a preguntar y **no genera ruido en ningún hook**: silencio total.
 Si el usuario cambia de opinión, `/clickup-setup` lo reactiva — pero solo si lo pide él.
+
+### El rol: quién entrega a quién
+
+`mode` dice **cómo se ve** el proyecto en el tablero. `role` dice **hacia dónde entrega**, y es lo
+que hace que el handoff reserve algo de verdad.
+
+| Rol | Contraparte | Al cerrar | Bandeja de entrada |
+| --- | --- | --- | --- |
+| `fullstack` | — | siempre cierra | sus propias tareas |
+| `backend` | registrada | puede dejar en el estado de handoff si toca el contrato | el backlog + pedidos detenidos |
+| `backend` | **no registrada** | **siempre cierra** | el backlog |
+| `frontend` | da igual | siempre cierra: es el final de la cadena | **el estado de handoff**, no `to do` |
+
+**La tercera fila es la que importa.** Un `backend` sin contraparte que parkea una tarea en el
+estado de handoff la deja esperando a **nadie**: no hay quien mire ese filtro, y la tarea *parece*
+entregada. Antes de tener el rol, el protocolo decía *"si dudás, va al estado de handoff"* incluso
+sin contraparte — o sea, perdía la tarea con apariencia de éxito.
+
+**Un `frontend` puede pedirle trabajo al backend exista o no su repositorio.** La asimetría es
+deliberada: parkear en el estado de handoff exige que alguien vigile ese filtro, mientras que una
+tarea detenida con el pedido escrito la encuentra cualquiera. El pedido es a una persona, no a un
+repositorio.
+
+```bash
+clickup-flow project set … --role backend --counterpart /ruta/al/frontend
+clickup-flow project set … --role frontend --counterpart /ruta/al/backend
+clickup-flow project set … --role fullstack
+clickup-flow project set … --counterpart none    # quitar la contraparte
+```
+
+`role` y `mode` son **ortogonales**: podés tener un backend con tareas normales o un backend con
+paraguas.
+
+### Un estado del tablero no le veta el trabajo a nadie
+
+Cuando el protocolo encuentra que el trabajo **ya está tomado o ya se hizo**, eso **no cancela
+nada**. La herramienta existe para que nadie duplique *por accidente*, no para negar trabajo por un
+estado en un tablero — y el usuario suele tener el contexto que falta: sabe que la otra persona no
+está, que es urgente, o que en realidad es otra tarea que se parece.
+
+**Se plantea una vez, con las tres salidas, y decide el usuario:**
+
+| Opción | Qué pasa |
+| --- | --- |
+| **No es la misma tarea** | Tarea nueva, vinculada a la que se encontró. **El caso más frecuente** |
+| **Sí es la misma, y la hago igual** | Se suma a los asignados y deja un comentario `TRABAJO EN PARALELO` con `notify_all` |
+| **No la hago** | Para, y dice a quién escribirle |
+
+Con la respuesta se procede, **y no se vuelve a plantear**. Repetir la advertencia cada turno es
+exactamente lo que hace que la gente deje de leerla.
+
+Lo único que no es opcional si elige seguir: el comentario con notificación. Es lo que evita que la
+otra persona descubra el trabajo duplicado en el merge.
 
 ### Los dos modos
 
