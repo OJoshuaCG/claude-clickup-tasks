@@ -80,13 +80,13 @@ Y dos más que conviene leer antes de contestar: **dónde va la fecha de fin** (
 
 ### Plataformas probadas
 
-Los diez suites (380 tests) corren y pasan en las dos, y la instalación completa
+Los quince suites (460 tests) corren y pasan en las dos, y la instalación completa
 —instalar → configurar → candado → desinstalar— se ejecutó de verdad en cada una:
 
 | | Estado |
 | --- | --- |
-| **Linux / WSL2** (node 22.22) | ✅ 380/380 · `install.sh` end-to-end |
-| **Windows 11** (node 22.13, PowerShell 5.1) | ✅ 380/380 · `install.ps1` end-to-end |
+| **Linux / WSL2** (node 22.22) | ✅ 460/460 · `install.sh` end-to-end |
+| **Windows 11** (node 22.13, PowerShell 5.1) | ✅ 460/460 · `install.ps1` end-to-end |
 | macOS | Sin probar. No debería haber diferencia con Linux (mismo `install.sh`, mismo node), pero no está verificado |
 
 Detalles que Windows obliga a manejar y están cubiertos por tests:
@@ -120,12 +120,12 @@ tres entradas propias en vez de acumularlas. Está cubierto por tests: el suite 
 que después de instalar, reinstalar y desinstalar **no falte nada de lo que había**.
 
 ```bash
-npm test                  # 380 tests, en un CLAUDE_CONFIG_DIR desechable
-npm run test:adversarial   # solo las auditorías adversariales
+npm test                  # 460 tests, en un CLAUDE_CONFIG_DIR desechable
 ```
 
-Diez suites, y seis de ellas son **adversariales**: no prueban que funcione con entrada
-válida, prueban que **con entrada inválida no borre nada y no explote**.
+Quince suites, y la mayoría son **adversariales**: no prueban que funcione con entrada válida,
+prueban que **con entrada inválida no borre nada y no explote**. `npm test` los descubre del
+directorio `test/`, así que agregar uno no requiere acordarse de anotarlo en ninguna lista.
 
 | Suite | Qué cubre |
 | --- | --- |
@@ -138,7 +138,12 @@ válida, prueban que **con entrada inválida no borre nada y no explote**.
 | `adversarial-identidad` | Matcheo de miembros y tokens: quién recibe el trabajo |
 | `adversarial-protocolo` | Render con configuración hostil, cajas y wrapping |
 | `adversarial-migracion` | Escaneo del protocolo viejo e importación del equipo |
-| `adversarial-cli` | 60 entradas hostiles a los tres hooks, parseo de argumentos |
+| `adversarial-cli` | Entradas hostiles a los tres hooks, parseo de argumentos, `project forget` |
+| `concurrencia` | 20 procesos escribiendo el config a la vez; encontró un lost update real |
+| `hostilidad` | Permisos, symlinks, nombres con comillas, payloads de 5 MB, cwd borrado |
+| `esquema` | 90 combinaciones de tipo equivocado + 192 combinaciones del protocolo |
+| `idempotencia` | Cada comando tres veces, y los 14 caminos de error uno por uno |
+| `instrucciones` | Que el skill y los comandos no pierdan sus reglas, y coincidan con la API |
 
 ---
 

@@ -82,6 +82,24 @@ Guías para presentarla bien:
 - Si hay muchísimos espacios, mostrá primero los que tienen coincidencia y ofrecé ver el resto.
 - La lista es **obligatoria**. Un espacio sin lista no alcanza: las tareas se crean en listas.
 
+### Si la jerarquía vuelve vacía o sin listas
+
+Pasa de verdad: `clickup_get_workspace_hierarchy` puede devolver un espacio con `children: []`.
+**No inventes un `list_id` ni entres en un bucle de reintentos.** En orden:
+
+1. **Paginá.** La respuesta trae `has_more` y `next_cursor`. Si `has_more` es `true`, volvé a
+   llamar con ese cursor hasta que sea `false`. Una sola llamada no garantiza la jerarquía completa.
+2. Si ya paginaste y sigue sin listas, **decilo tal cual** — "la conexión de ClickUp no ve ninguna
+   lista en este workspace" — y ofrecé las dos salidas reales:
+   - que el usuario pegue la **URL o el id** de la lista, y verificalo con
+     `clickup_get_list` antes de guardarlo — un `list_id` que no resuelve deja el proyecto
+     configurado y roto a la vez, o
+   - crear una lista con `clickup_create_list` (o `clickup_create_list_in_folder`), **preguntando
+     primero** el nombre y dónde.
+3. Si tampoco eso se puede, **cerrá el setup sin escribir nada** y explicá que sin lista el
+   protocolo no puede operar. Una configuración a medias es peor que ninguna: el candado quedaría
+   cerrado sobre un proyecto que no puede crear tareas.
+
 Anotá el `workspace_id`, `space_id` + nombre, `folder_id` + nombre si la lista está en una carpeta,
 y `list_id` + nombre.
 
