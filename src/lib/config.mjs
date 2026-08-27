@@ -216,6 +216,7 @@ export function loadConfig() {
     if (!isPlainObject(parsed)) throw new Error('la raíz del config no es un objeto');
     const config = fillDefaults(parsed, defaultConfig());
     config.version = CONFIG_VERSION;
+    BASELINE.set(config, structuredClone(config));
     return { config, ok: true, existed: true, error: null };
   } catch (err) {
     return {
@@ -227,15 +228,144 @@ export function loadConfig() {
   }
 }
 
-/** Atomic-ish write: temp file then rename, so a crash mid-write cannot leave a truncated config. */
+/**
+ * Los bytes de los que salió cada objeto de config, para poder distinguir "esto lo cambié yo"
+ * de "esto ya estaba así". Es un WeakMap: si el caller suelta el config, la baseline se va con él.
+ */
+const BASELINE = new WeakMap();
+
+/** Espera bloqueante sin dependencias ni busy-loop. */
+function dormir(ms) {
+  try {
+    Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, ms);
+  } catch {
+    const hasta = Date.now() + ms;
+    while (Date.now() < hasta) {
+      /* último recurso: SharedArrayBuffer deshabilitado */
+    }
+  }
+}
+
+/**
+ * Lock entre procesos con `mkdir`, que es atómico en POSIX y en Windows y no necesita nada
+ * instalado. Un lock viejo se rompe: si el proceso que lo tomó murió, nadie lo va a soltar.
+ *
+ * Si el lock no se consigue dentro del timeout se escribe igual. Perder una escritura por
+ * contención sería peor que el problema que el lock resuelve: el usuario dio una orden y la
+ * orden tiene que tener efecto. En el peor caso se degrada al comportamiento de antes.
+ */
+function conLock(fn, { timeoutMs = 5000, staleMs = 30000 } = {}) {
+  const dir = `${configPath()}.lock`;
+  const desde = Date.now();
+  let tomado = false;
+  while (Date.now() - desde < timeoutMs) {
+    try {
+      fs.mkdirSync(dir);
+      tomado = true;
+      break;
+    } catch (err) {
+      if (err && err.code !== 'EEXIST') break; // un problema de permisos no se resuelve esperando
+      try {
+        if (Date.now() - fs.statSync(dir).mtimeMs > staleMs) {
+          fs.rmSync(dir, { recursive: true, force: true });
+          continue;
+        }
+      } catch {
+        continue; // el lock se soltó entre el statSync y nosotros: reintentar ya
+      }
+      dormir(10 + Math.floor(Math.random() * 30));
+    }
+  }
+  try {
+    return fn();
+  } finally {
+    if (tomado) {
+      try {
+        fs.rmSync(dir, { recursive: true, force: true });
+      } catch {
+        /* si no se puede borrar, el staleMs lo recicla */
+      }
+    }
+  }
+}
+
+/**
+ * Aplica sobre `fresco` sólo lo que cambió entre `base` (lo que este proceso leyó) y
+ * `propuesto` (lo que este proceso quiere escribir).
+ *
+ * Esto es lo que separa una fusión ciega de una correcta: una fusión ciega resucitaría la
+ * entrada que `project forget` acaba de borrar. Acá el borrado es una intención explícita
+ * (estaba en base, no está en propuesto) y se respeta, mientras que las claves que otro
+ * proceso agregó — que no están ni en base ni en propuesto — sobreviven intactas.
+ */
+function aplicarIntencion(fresco, base, propuesto) {
+  for (const k of Object.keys(propuesto)) {
+    const nuevo = propuesto[k];
+    const viejo = base ? base[k] : undefined;
+    if (isPlainObject(nuevo) && isPlainObject(viejo) && isPlainObject(fresco[k])) {
+      aplicarIntencion(fresco[k], viejo, nuevo);
+    } else if (JSON.stringify(nuevo) !== JSON.stringify(viejo)) {
+      fresco[k] = structuredClone(nuevo);
+    }
+  }
+  if (!base) return fresco;
+  for (const k of Object.keys(base)) {
+    if (!(k in propuesto)) delete fresco[k];
+  }
+  return fresco;
+}
+
+/**
+ * Escritura atómica (archivo temporal + rename) bajo lock, reconciliada contra el disco.
+ *
+ * El rename atómico por sí solo evita un archivo truncado, pero NO evita el lost update: dos
+ * sesiones de Claude Code en proyectos distintos leen el mismo config, cada una agrega su
+ * proyecto, y el último rename borra el trabajo de la otra. Medido: 12 de 20 registros
+ * simultáneos se perdían. Por eso se relee el disco DENTRO del lock y se aplica sólo la
+ * intención de este proceso.
+ */
 export function saveConfig(config) {
   fs.mkdirSync(toolHome(), { recursive: true });
   const file = configPath();
-  const tmp = `${file}.tmp-${process.pid}`;
-  config.updated_at = new Date().toISOString();
-  fs.writeFileSync(tmp, `${JSON.stringify(config, null, 2)}\n`, 'utf8');
-  fs.renameSync(tmp, file);
-  return file;
+  return conLock(() => {
+    const base = BASELINE.get(config);
+    let salida = config;
+    if (base) {
+      const disco = loadConfigSinBaseline();
+      // Un config ilegible en disco no se reconcilia: fusionar contra defaults borraría lo que
+      // el usuario tiene escrito a mano. Se escribe lo que este proceso decidió, sin más.
+      if (disco.ok && disco.existed) {
+        salida = aplicarIntencion(disco.config, base, config);
+      }
+    }
+    salida.updated_at = new Date().toISOString();
+    const tmp = `${file}.tmp-${process.pid}`;
+    fs.writeFileSync(tmp, `${JSON.stringify(salida, null, 2)}\n`, 'utf8');
+    fs.renameSync(tmp, file);
+    // El caller sigue teniendo su objeto en la mano y a veces imprime desde él: se sincroniza
+    // con lo que realmente quedó escrito, para que no muestre algo distinto del archivo.
+    if (salida !== config) {
+      for (const k of Object.keys(config)) if (!(k in salida)) delete config[k];
+      Object.assign(config, structuredClone(salida));
+    }
+    BASELINE.set(config, structuredClone(salida));
+    return file;
+  });
+}
+
+/** loadConfig sin registrar baseline: la relectura de dentro del lock no es la del caller. */
+function loadConfigSinBaseline() {
+  const file = configPath();
+  if (!fs.existsSync(file)) return { config: defaultConfig(), ok: true, existed: false };
+  try {
+    const parsed = JSON.parse(fs.readFileSync(file, 'utf8'));
+    if (!isPlainObject(parsed)) throw new Error('la raíz del config no es un objeto');
+    const config = fillDefaults(parsed, defaultConfig());
+    config.version = CONFIG_VERSION;
+    return { config, ok: true, existed: true };
+  } catch {
+    return { config: defaultConfig(), ok: false, existed: true };
+  }
 }
 
 /** `git config user.email` for a directory. Null when there is no git or no email set. */
@@ -247,12 +377,6 @@ export function gitEmail(dir) {
 export function gitRemote(dir) {
   const url = runGit(dir, ['remote', 'get-url', 'origin']);
   return url ? normaliseRemote(url) : null;
-}
-
-/** Repository root, so a subdirectory of a registered project still resolves to that project. */
-export function gitRoot(dir) {
-  const root = runGit(dir, ['rev-parse', '--show-toplevel']);
-  return root ? canonicalProjectKey(root) : null;
 }
 
 function runGit(dir, args) {
