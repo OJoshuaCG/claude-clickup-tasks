@@ -295,6 +295,145 @@ check('con el config BORRADO, los hooks siguen callados y en 0', () => {
   }
 });
 
+// ---------------------------------------------------------------------------------------
+// `project forget` es el comando MÁS destructivo del CLI: borra la entrada del config y el
+// estado del proyecto. Estaba sin un solo test. Un fallo acá no se nota hasta que alguien
+// pierde la configuración de otro repositorio.
+// ---------------------------------------------------------------------------------------
+console.log('\nPROJECT FORGET (borra config y estado)\n');
+
+function runEn(dirTrabajo, args, input) {
+  const r = spawnSync('node', [CLI, ...args], {
+    encoding: 'utf8',
+    env,
+    cwd: dirTrabajo,
+    input: input ?? '',
+  });
+  return { code: r.status ?? -1, stdout: r.stdout ?? '', stderr: r.stderr ?? '' };
+}
+
+const cfgFile = path.join(fakeClaude, 'clickup-flow', 'config.json');
+const leerCfg = () => JSON.parse(fs.readFileSync(cfgFile, 'utf8'));
+const escribirCfg = (c) => fs.writeFileSync(cfgFile, JSON.stringify(c, null, 2));
+
+// Dos proyectos hermanos y un subdirectorio, para probar que el borrado no se desborda.
+const olvA = path.join(sandbox, 'olvidable-a');
+const olvB = path.join(sandbox, 'olvidable-b');
+const olvSub = path.join(olvA, 'src', 'api');
+fs.mkdirSync(olvSub, { recursive: true });
+fs.mkdirSync(olvB, { recursive: true });
+
+// La clave del config la calcula el propio CLI, así que en vez de replicar la normalización
+// (y arriesgar que el test pruebe MI copia de la regla en lugar de la de producción) se
+// registran los proyectos con `project set` y después se leen las claves que quedaron.
+function sembrar() {
+  for (const dir of [olvA, olvB]) {
+    const r = runEn(dir, ['project', 'set', '--mode', 'tasks', '--list-id', '900', '--role', 'fullstack']);
+    assert(r.code === 0, `no pudo sembrar ${dir}: ${r.stderr}`);
+  }
+  const claves = Object.keys(leerCfg().projects || {});
+  const keyA = claves.find((k) => k.endsWith('olvidable-a'));
+  const keyB = claves.find((k) => k.endsWith('olvidable-b'));
+  assert(keyA && keyB, `las entradas no quedaron registradas: ${claves.join(', ')}`);
+  return { keyA, keyB };
+}
+
+check('forget en un proyecto que no está registrado falla y no borra nada', () => {
+  const { keyA, keyB } = sembrar();
+  const antes = Object.keys(leerCfg().projects).length;
+  const r = runEn(noProj, ['project', 'forget']);
+  assert(r.code === 1, `esperaba exit 1, dio ${r.code}`);
+  assert(/no hay entrada exacta/i.test(r.stderr + r.stdout), `no explica el motivo: ${r.stderr}`);
+  const despues = leerCfg().projects;
+  assert(Object.keys(despues).length === antes, 'borró entradas al fallar');
+  assert(despues[keyA] && despues[keyB], 'perdió proyectos ajenos');
+});
+
+check('forget borra SOLO la entrada de este proyecto', () => {
+  const { keyA, keyB } = sembrar();
+  const r = runEn(olvA, ['project', 'forget']);
+  assert(r.code === 0, `exit ${r.code}: ${r.stderr}`);
+  const p = leerCfg().projects;
+  assert(!p[keyA], 'no borró la entrada pedida');
+  assert(p[keyB], `borró de más: desapareció ${keyB}`);
+});
+
+check('forget desde un subdirectorio NO borra la entrada del ancestro', () => {
+  const { keyA } = sembrar();
+  const r = runEn(olvSub, ['project', 'forget']);
+  assert(r.code === 1, `un subdirectorio pudo borrar el proyecto padre (exit ${r.code})`);
+  assert(leerCfg().projects[keyA], 'borró la entrada del ancestro desde un subdirectorio');
+});
+
+check('forget borra también el estado (claim) del proyecto', () => {
+  sembrar();
+  runEn(olvA, ['identity', 'set', '--id', '4242', '--confirm']);
+  const c = runEn(olvA, ['claim', '--task-id', 'TAREA-OLV']);
+  assert(c.code === 0, `el claim falló, el test no probaría nada: ${c.stderr}`);
+  const estados = path.join(fakeClaude, 'clickup-flow', 'state');
+  const antes = fs.existsSync(estados) ? fs.readdirSync(estados).length : 0;
+  assert(antes > 0, 'el claim no dejó archivo de estado: el test no prueba nada');
+  runEn(olvA, ['project', 'forget']);
+  const despues = fs.existsSync(estados) ? fs.readdirSync(estados).length : 0;
+  assert(despues < antes, `el estado sobrevivió al forget (${antes} -> ${despues})`);
+});
+
+check('forget sirve para des-excluir: borra una entrada excluida', () => {
+  const { keyA } = sembrar();
+  const c = leerCfg();
+  c.projects[keyA] = { mode: 'excluded' };
+  escribirCfg(c);
+  const r = runEn(olvA, ['project', 'forget']);
+  assert(r.code === 0, `no pudo borrar una exclusión: ${r.stderr}`);
+  assert(!leerCfg().projects[keyA], 'la exclusión sobrevivió');
+  assert(/volver a preguntar/i.test(r.stdout), 'no avisa que se va a volver a preguntar');
+});
+
+check('forget no toca la identidad ni settings.json', () => {
+  sembrar();
+  const id = runEn(olvA, ['identity', 'set', '--id', '777', '--confirm']);
+  assert(id.code === 0, `identity set falló, el test no probaría nada: ${id.stderr}`);
+  const settingsAntes = fs.readFileSync(path.join(fakeClaude, 'settings.json'), 'utf8');
+  runEn(olvA, ['project', 'forget']);
+  const c = leerCfg();
+  assert(
+    String(c.identity?.clickup_user_id) === '777',
+    `perdió la identidad: ${JSON.stringify(c.identity)}`,
+  );
+  assert(
+    fs.readFileSync(path.join(fakeClaude, 'settings.json'), 'utf8') === settingsAntes,
+    'modificó settings.json',
+  );
+});
+
+// ---------------------------------------------------------------------------------------
+// `config path` es el único comando que tiene que responder CON el config roto: es cómo
+// alguien encuentra el archivo que tiene que ir a arreglar a mano.
+// ---------------------------------------------------------------------------------------
+console.log('\nCONFIG PATH (tiene que responder con el config roto)\n');
+
+check('config path imprime una ruta absoluta que existe', () => {
+  const r = run(['config', 'path']);
+  assert(r.code === 0, `exit ${r.code}: ${r.stderr}`);
+  const ruta = r.stdout.trim();
+  assert(ruta.length > 0, 'no imprimió nada');
+  assert(path.isAbsolute(ruta), `la ruta no es absoluta: ${ruta}`);
+  assert(fs.existsSync(ruta), `la ruta impresa no existe: ${ruta}`);
+});
+
+check('config path responde igual con el config corrupto', () => {
+  const bueno = fs.readFileSync(cfgFile, 'utf8');
+  try {
+    fs.writeFileSync(cfgFile, '{ esto no es json');
+    const r = run(['config', 'path']);
+    assert(r.code === 0, `con el config roto dio exit ${r.code}: ${r.stderr}`);
+    assert(r.stdout.trim().length > 0, 'no imprimió la ruta con el config roto');
+    assert(!tieneStack(r.stdout + r.stderr), 'filtró un stack trace');
+  } finally {
+    fs.writeFileSync(cfgFile, bueno);
+  }
+});
+
 console.log(`\n${pass} pasaron, ${fail} fallaron\n`);
 if (fail) {
   for (const f of failures) console.log(`  - ${f.name}: ${f.err.message}`);
