@@ -183,6 +183,29 @@ clickup_add_task_link  task_id:"<la nueva>"  links_to:"<la original>"
 
 **Ante la duda, preguntá antes de crear nada.** El humano tiene contexto que el protocolo no.
 
+## Un estado del tablero NO le veta el trabajo al usuario
+
+Esto vale para todo el protocolo y es fácil de exagerar en la dirección equivocada.
+
+Cuando encontrás que el trabajo **ya está tomado o ya se hizo**, eso **no cancela nada**. La
+herramienta existe para que nadie duplique **por accidente**, no para negar trabajo por un estado
+en un tablero. Y el usuario suele tener el contexto que falta: sabe que la otra persona no está,
+sabe que es urgente, o sabe que en realidad es otra tarea que se parece.
+
+**La regla:**
+
+1. **Se plantea UNA vez**, con la información completa: quién la tiene, desde cuándo, con qué rol,
+   y el resumen del `FIN` si estaba cerrada. "Alguien la tiene" no es información.
+2. **Se ofrecen las tres salidas**, explícitamente: *no es la misma tarea* (tarea nueva vinculada —
+   el caso más frecuente), *sí es la misma y la hago igual*, o *no la hago*.
+3. **Decide el usuario, y se cumple.** Si elige seguir, se sigue.
+4. **No se vuelve a plantear.** Repetir la advertencia cada turno es lo que hace que la gente deje
+   de leerla.
+
+Lo único que **no** es opcional cuando el usuario elige seguir sobre una tarea ajena: sumarse a los
+asignados y dejar un comentario `TRABAJO EN PARALELO` con `notify_all: true`. Es lo que evita que
+la otra persona descubra el trabajo duplicado en el merge. `context` trae el formato exacto.
+
 ## Paso 3 — Reclamar, antes de la primera línea de código
 
 `context` imprime la llamada exacta. Las dos reglas que se rompen solas si no tenés cuidado:

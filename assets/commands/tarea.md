@@ -58,12 +58,11 @@ Si no la podés determinar, **preguntá** — no la inventes ni uses la de hoy p
 **5. Según lo que encuentres**, seguí la tabla que imprimió `context`. Los dos casos que más se
 equivocan:
 
-- **`in progress`** → leé el último `INICIO`: quién, desde cuándo, qué rol. Si venís a hacer lo
-  mismo → **PARÁ e informá quién la tiene**. No sigas sin confirmación del usuario.
-- **`complete`** → **PARÁ Y AVISÁ: este trabajo ya se hizo.** Mostrá el resumen del `FIN`, quién lo
-  cerró y cuándo, y **esperá confirmación antes de tocar una línea.** Recién con su OK aplicás la
-  prueba del objetivo declarado: fix reciente → reabrir; trabajo distinto o cierre viejo → tarea
-  nueva vinculada.
+- **`in progress`** → alguien la tiene. Leé el último `INICIO` (quién, desde cuándo, qué rol) y
+  seguí la sección **"Si el trabajo ya está tomado"** de `context`: se plantea **una vez**, con las
+  tres salidas, y **decide el usuario**. Un estado en un tablero no le veta el trabajo a nadie.
+- **`complete`** → ya se hizo. Mostrá el resumen del `FIN`, quién lo cerró y cuándo, y ofrecé las
+  mismas tres salidas. Acá "es la misma tarea" significa **reabrir** con un comentario `REAPERTURA`.
 
 **6. Reclamala** con la llamada que imprimió `context` (estado + fecha de inicio + unión de
 asignados, en **una sola** llamada), publicá el comentario `INICIO`, **re-verificá que ganaste la
@@ -241,6 +240,9 @@ Es un tablero compartido y puede ser grande: agrupá y no vuelques cien tareas.
 
 - **`context` primero.** Las coordenadas y los campos salen de ahí, no de tu memoria ni de otro repo.
 - **Buscar antes de crear**, con varios términos y `include_closed` encendido.
+- **Una colisión se plantea UNA vez y decide el usuario.** Si elige seguir igual, se cumple —
+  sumándose a los asignados y dejando un comentario `TRABAJO EN PARALELO` con `notify_all`, para
+  que la otra persona se entere ahora y no en el merge.
 - **`in progress` va ANTES de escribir código**, no después.
 - **La identidad de los comentarios es el EMAIL**, dentro del texto. Para asignar, el **id numérico**.
   **`"me"` está prohibido**: resuelve al dueño del token y le asigna todo a la misma persona.

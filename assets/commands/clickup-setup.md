@@ -148,12 +148,46 @@ clickup_get_task  task_id:"<id>"
 Si el id no existe, o está en otra lista que la elegida, **decíselo y no lo guardes**: un paraguas
 mal apuntado hace que todas las subtareas caigan en otro lado.
 
-Después, dos preguntas más — con default, para que se puedan contestar con Enter:
+### Paso 3.5 — El ROL del proyecto en la cadena de entrega
 
-- **¿Hay handoff entre roles en este proyecto?** (backend entrega y frontend implementa, o
-  parecido). Si sí, el protocolo usa `update required` con su significado exacto: *falta el otro
-  rol*, y nada más. Default: **no**.
-- **¿Los títulos llevan un prefijo de ID** tipo `T-260827-ocarrasc-slug`, o son **descriptivos
+**Esta pregunta decide la dirección de las entregas, y saltearla produce tareas que esperan a
+nadie.** Preguntá siempre:
+
+> **¿Qué hace este proyecto?**
+>
+> **1. `backend`** — entrega trabajo que otro proyecto consume (API, servicio, motor).
+> **2. `frontend`** — consume lo que el backend deja listo (SPA, app, interfaz).
+> **3. `fullstack`** — hace las dos puntas. **El caso más simple, y el default.**
+
+Y si eligió `backend` o `frontend`, la segunda mitad de la pregunta:
+
+> **¿Hay OTRO proyecto que sea su contraparte, y está registrado con esta herramienta?**
+
+Con eso el protocolo se deriva solo. Lo que cambia según la respuesta:
+
+| Rol | Contraparte | Al cerrar | Bandeja de entrada |
+| --- | --- | --- | --- |
+| `fullstack` | — | siempre cierra | sus propias tareas |
+| `backend` | sí | puede dejar en el estado de handoff si toca el contrato | el backlog + pedidos en `on hold` |
+| `backend` | **no** | **siempre cierra** | el backlog |
+| `frontend` | sí o no | siempre cierra: es el final de la cadena | **el estado de handoff**, no `to do` |
+
+**La fila que importa es la tercera.** Un `backend` sin contraparte registrada que parkea una tarea
+en el estado de handoff la deja esperando a **nadie**: no hay quien mire ese filtro, y la tarea
+parece entregada. Por eso, sin contraparte, ese estado no se usa.
+
+**Un `frontend` puede pedirle trabajo al backend exista o no su repositorio**, dejando una tarea en
+`on hold` con el pedido escrito. El pedido es a una persona, no a un repositorio: una tarea con el
+pedido adentro la encuentra cualquiera, no hace falta que nadie vigile un filtro.
+
+Si la contraparte todavía no está registrada, **anotala igual**: el comando avisa que falta y
+funciona cuando la registres.
+
+---
+
+Después, una pregunta más — con default, para que se pueda contestar con Enter:
+
+- **¿Los títulos llevan un prefijo de ID** tipo `T-260827-atorres-slug`, o son **descriptivos
   libres**? El prefijo hace el anti-duplicados más fuerte (se compara por id, no por texto), pero
   **solo tiene sentido si el equipo ya lo usa** — meter un esquema nuevo entre las tareas de los
   demás es cambiarles la convención sin avisarles. Default: **descriptivos**.
@@ -173,7 +207,8 @@ Después, dos preguntas más — con default, para que se puedan contestar con E
   [--folder-id <id> --folder-name "<nombre>"] \
   --list-id <id> --list-name "<nombre>" \
   [--umbrella-task-id <id>] \
-  [--handoff true] \
+  --role backend|frontend|fullstack \
+  [--counterpart <ruta del proyecto contraparte>] \
   [--naming prefixed] \
   --status-todo "<nombre real>" \
   --status-in-progress "<nombre real>" \
