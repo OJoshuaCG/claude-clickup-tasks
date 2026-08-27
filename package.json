@@ -12,8 +12,7 @@
     "uninstall-tool": "node src/installer.mjs --uninstall",
     "status": "node src/installer.mjs --status",
     "doctor": "node src/cli.mjs doctor",
-    "test": "node test/paths.mjs && node test/adversarial-settings.mjs && node test/adversarial-estado.mjs && node test/adversarial-identidad.mjs && node test/adversarial-protocolo.mjs && node test/adversarial-migracion.mjs && node test/adversarial-cli.mjs && node test/run.mjs && node test/flujo.mjs && node test/ciclo-vida.mjs",
-    "test:adversarial": "node test/adversarial-settings.mjs && node test/adversarial-estado.mjs && node test/adversarial-identidad.mjs && node test/adversarial-protocolo.mjs && node test/adversarial-migracion.mjs && node test/adversarial-cli.mjs"
+    "test": "node test/all.mjs"
   },
   "engines": {
     "node": ">=18"
