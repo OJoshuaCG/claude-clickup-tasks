@@ -1066,11 +1066,16 @@ function renderPending(ctx) {
   }
 
   out.push(
-    'Los tres caminos, según lo que conteste el usuario:',
+    'Hacele la pregunta de forma directa y **ejecutá su respuesta vos mismo**:',
     '',
-    `1. **Sí, acá se gestionan tareas** → \`/clickup-setup\` (pregunta la lista destino y el modo).`,
-    `2. **No, este proyecto no usa ClickUp** → \`${ctx.cli} project exclude --reason "<motivo>"\``,
-    `3. **Ahora no, después vemos** → \`${ctx.cli} project snooze\``,
+    `1. **Sí** → corré \`/clickup-setup\` (pregunta la lista destino y el modo de trabajo).`,
+    `2. **No** → corré \`${ctx.cli} project exclude --reason "<lo que dijo>"\``,
+    '3. **Omitir** → no corras nada y seguí trabajando.',
+    '',
+    'Sí y No quedan registrados y no se vuelve a preguntar nunca más acá. **Omitir no registra',
+    'nada**: el resto de esta solicitud sigue sin interrupciones y en la próxima se vuelve a',
+    'preguntar. Se insiste a propósito — un proyecto sin decidir es un proyecto donde la',
+    'herramienta no hace nada y nadie se entera.',
   );
 
   // Se filtra `null`, NO el string vacío: las líneas vacías son los párrafos del markdown.

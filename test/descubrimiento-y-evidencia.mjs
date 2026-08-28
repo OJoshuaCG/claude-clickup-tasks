@@ -98,8 +98,13 @@ function hook(nombre, payload) {
   return cli([nombre], JSON.stringify(payload));
 }
 
-const guard = (cwd, file) =>
-  hook('guard', { cwd, tool_name: 'Write', tool_input: { file_path: file } });
+const guard = (cwd, file, solicitud = null) =>
+  hook('guard', {
+    cwd,
+    tool_name: 'Write',
+    tool_input: { file_path: file },
+    ...(solicitud ? { prompt_id: solicitud } : {}),
+  });
 const guardBash = (cwd, command) =>
   hook('guard', { cwd, tool_name: 'Bash', tool_input: { command } });
 
@@ -131,10 +136,36 @@ assert(
 );
 
 {
-  // ESTA es la propiedad que hace tolerable un candado global: pregunta y pospone en el mismo
-  // acto. Si insistiera, se desinstalaría.
-  const r = guard(NUEVO, `${NUEVO}/src/otro.py`);
-  assert(r.code === 0, 'la SEGUNDA escritura ya no bloquea (quedó pospuesta)', `exit ${r.code}`);
+  // "Omitir" está acotado a la SOLICITUD, no a los días.
+  //
+  // La primera versión posponía 7 días al preguntar, y eso era la queja original en cámara
+  // lenta: si el usuario ignoraba la pregunta una vez, el proyecto quedaba sin decidir una
+  // semana y la herramienta no hacía nada. Ahora el resto de la MISMA solicitud sigue sin
+  // interrupciones, y la siguiente vuelve a preguntar hasta que haya un sí o un no.
+  const r = guard(NUEVO, `${NUEVO}/src/otro.py`, 'solicitud-1');
+  assert(r.code === 2, 'no preguntó en una solicitud nueva', `exit ${r.code}`);
+
+  const mismo = guard(NUEVO, `${NUEVO}/src/tercero.py`, 'solicitud-1');
+  assert(mismo.code === 0, 'volvió a interrumpir dentro de la MISMA solicitud', `exit ${mismo.code}`);
+
+  const siguiente = guard(NUEVO, `${NUEVO}/src/cuarto.py`, 'solicitud-2');
+  assert(siguiente.code === 2, 'no volvió a preguntar en la solicitud siguiente');
+
+  assert(
+    /OMITIR/.test(siguiente.err) && /EJECUTÁ SU RESPUESTA/.test(siguiente.err),
+    'el mensaje no le ordena al modelo ejecutar la respuesta',
+  );
+}
+
+{
+  // Aplazamiento EXPLÍCITO por días: sigue existiendo como escape, y ese sí calla varias
+  // solicitudes seguidas.
+  cli(['project', 'snooze', '--days', '7', '--cwd', NUEVO]);
+  assert(
+    guard(NUEVO, `${NUEVO}/src/quinto.py`, 'solicitud-3').code === 0,
+    '`project snooze --days` no silenció la pregunta',
+  );
+  cli(['project', 'forget', '--cwd', NUEVO]);
 }
 
 {

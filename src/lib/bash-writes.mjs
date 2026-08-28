@@ -292,6 +292,24 @@ const SCRIPT_ESCRIBE =
 /** Flags que introducen un script inline en vez de un archivo. */
 const FLAGS_SCRIPT = new Set(['-c', '-e', '--eval', '--execute', '-p', '-E']);
 
+/**
+ * Un destino cuya ruta real NO se puede saber leyendo la línea.
+ *
+ * Encontrado usando la herramienta de verdad: un comando escribía a un archivo temporal FUERA del
+ * proyecto, pero la ruta venía en una variable (`$CLAUDE_CONFIG_DIR/x.json`). El tokenizador no
+ * expande variables, así que el destino quedaba como texto sin `/` inicial, se resolvía contra el
+ * directorio del proyecto y el candado bloqueaba de más.
+ *
+ * El error era hacia el lado seguro, pero es fricción real. Y la afirmación honesta es que NO SE
+ * SABE dónde escribe: un destino sin resolver no se puede contar como escritura del proyecto, del
+ * mismo modo que no se puede descartar. Se omite del listado; si el comando además tiene una forma
+ * de escritura sin destino nombrable, `unknownTarget` ya lo cubre por su cuenta.
+ */
+function destinoSinResolver(texto) {
+  const t = String(texto ?? '');
+  return t.startsWith('$') || t.startsWith('~') || t.includes('$(') || t.includes('${') || t.includes('`');
+}
+
 function esFlag(texto) {
   return texto.startsWith('-') && texto !== '-' && texto !== '--';
 }
@@ -357,7 +375,7 @@ function analizarSegmento(tokens) {
       const destino = tokens[i + 1];
       if (destino && !destino.op) {
         i++;
-        if (!DESTINOS_NO_ARCHIVO.test(destino.text)) {
+        if (!DESTINOS_NO_ARCHIVO.test(destino.text) && !destinoSinResolver(destino.text)) {
           targets.push(destino.text);
           reasons.push(`redirección \`${t.text}\` a ${destino.text}`);
         }
@@ -392,7 +410,11 @@ function analizarSegmento(tokens) {
   const spec = COMANDOS.get(nombre);
   if (!spec) return { targets, unknown, reasons };
 
-  const noFlags = args.filter((a) => !esFlag(a.text)).map((a) => a.text);
+  // Los destinos que no se pueden resolver se descartan acá, una sola vez, para todos los
+  // comandos de la tabla. Ver `destinoSinResolver`.
+  const noFlags = args
+    .filter((a) => !esFlag(a.text) && !destinoSinResolver(a.text))
+    .map((a) => a.text);
 
   switch (spec.kind) {
     case 'args':

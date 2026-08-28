@@ -198,12 +198,22 @@ async function cmdSessionStart() {
   }
 
   if (!ctx.registered) {
+    // EL ORDEN DE ESTAS FRASES IMPORTA, y se cambió por un caso observado.
+    //
+    // La versión anterior abría con "el protocolo NO aplica y se puede trabajar normalmente". El
+    // modelo parafraseaba justo esa oración —"el candado está abierto y sigo directo"— y tiraba
+    // la mitad que pedía ofrecer el setup. O sea: el mensaje inducía la omisión que venía a
+    // evitar, y encima dejaba al usuario sin saber que en la primera escritura se iba a frenar.
+    //
+    // Ahora abre por lo que está POR PASAR. Lo permisivo va después, acotado.
     say(
-      '[clickup-flow] Este proyecto no tiene espacio de ClickUp asignado. El protocolo de tareas ' +
-        'NO aplica y se puede trabajar normalmente — no inventes coordenadas ni crees tareas por ' +
-        'tu cuenta. Si el trabajo de acá debería quedar registrado en el tablero, ofrecele al ' +
-        'usuario correr `/clickup-setup`. Si no lo hacés, la herramienta va a preguntar sola la ' +
-        'primera vez que se escriba código acá.',
+      '[clickup-flow] Falta decidir si este proyecto lleva seguimiento en ClickUp, y la ' +
+        'herramienta va a preguntarlo en la PRIMERA escritura de código acá. Podés adelantarte: ' +
+        'preguntale al usuario si el trabajo de este proyecto debería quedar registrado como ' +
+        'tareas, y ejecutá su respuesta — `/clickup-setup` si dice que sí, ' +
+        `\`${ctx.cli} project exclude\` si dice que no. Hasta que haya un sí o un no registrado, ` +
+        'leer, investigar y responder no requieren nada, pero no inventes coordenadas ni crees ' +
+        'tareas por tu cuenta.',
     );
     return 0;
   }
@@ -365,7 +375,7 @@ async function cmdGuard() {
 
   // ---- proyecto sin decisión: se pregunta UNA vez ----
   if (ctx.status === 'unknown' || ctx.status === 'pending') {
-    return preguntarPorProyecto(config, ctx, cwd);
+    return preguntarPorProyecto(config, ctx, cwd, payload);
   }
 
   // ---- proyecto activo ----
@@ -483,13 +493,11 @@ async function cmdGuard() {
  *      inmediatamente: el segundo intento ya no bloquea. Un candado que insiste se desinstala.
  *   3. `defaults.ask_new_projects: false` la apaga para toda la máquina.
  */
-function preguntarPorProyecto(config, ctx, cwd) {
+function preguntarPorProyecto(config, ctx, cwd, payload) {
   const d = ctx.defaults;
-
-  // Aunque no se pregunte, se DEJA CONSTANCIA de la carpeta. Sin el registro no hay forma de
-  // preguntar una sola vez más adelante, ni de que `doctor` sepa qué proyectos vio.
   const yaVisto = ctx.status === 'pending';
 
+  // El interruptor global y el aplazamiento EXPLÍCITO (`project snooze --days N`) siguen mandando.
   if (!d.ask_new_projects || ctx.snoozed) {
     if (!yaVisto) {
       markPending(config, cwd);
@@ -498,55 +506,70 @@ function preguntarPorProyecto(config, ctx, cwd) {
     return 0;
   }
 
-  const dias = Number(d.snooze_days) > 0 ? Number(d.snooze_days) : 7;
+  // La llave del "omitir": el id de la SOLICITUD del usuario.
+  //
+  // `prompt_id` es un UUID por prompt. Si ya preguntamos en esta solicitud, el resto de la
+  // solicitud sigue sin interrupciones; en la próxima se vuelve a preguntar. Eso es exactamente
+  // "omitir": no es un permiso, es un "ahora no".
+  //
+  // Degradación en escalera, porque `prompt_id` necesita Claude Code v2.1.196+: sin él se usa el
+  // `session_id` (una pregunta por sesión), y sin ninguno de los dos se pregunta una sola vez y
+  // se cae al aplazamiento por días, que es el comportamiento conservador.
+  const idSolicitud = payload?.prompt_id || payload?.session_id || null;
   const entrada = ctx.project ?? {};
-  markPending(config, cwd, {
+  if (idSolicitud && entrada.skip_request_id === idSolicitud) return 0;
+
+  const patch = {
     ask_count: (entrada.ask_count ?? 0) + 1,
     last_asked_at: new Date().toISOString(),
-    // Posponer AL PREGUNTAR, no al contestar. Es lo que garantiza que el bloqueo sea uno solo.
-    snoozed_until: new Date(Date.now() + dias * 86_400_000).toISOString(),
-  });
+    skip_request_id: idSolicitud,
+  };
+  // Sin id de solicitud no hay forma de acotar el "omitir" a esta vuelta, así que se cae al
+  // aplazamiento por días para no preguntar en bucle dentro del mismo turno.
+  if (!idSolicitud) {
+    const dias = Number(d.snooze_days) > 0 ? Number(d.snooze_days) : 7;
+    patch.snoozed_until = new Date(Date.now() + dias * 86_400_000).toISOString();
+  }
+  markPending(config, cwd, patch);
   saveConfig(config);
 
   const sug = ctx.orgSuggestions;
   const lineas = [
-    'clickup-flow: ¿este proyecto genera tareas en ClickUp?',
+    'clickup-flow: falta decidir si este proyecto lleva seguimiento en ClickUp.',
     '',
     `Carpeta: ${ctx.cwd}`,
     '',
-    'Es la primera vez que se escribe código acá con la herramienta instalada, y no hay ninguna',
-    'respuesta registrada para esta carpeta. Se pregunta UNA sola vez: contestes lo que contestes',
-    `—o si no contestás nada— el próximo intento de escritura ya no se bloquea (se pospone ${dias} días).`,
+    'PREGUNTALE AL USUARIO AHORA, de forma directa, y EJECUTÁ SU RESPUESTA vos mismo.',
+    'No se la menciones al pasar ni le sugieras que corra algo: hacé la pregunta y actuá.',
     '',
+    '  ¿Querés que el trabajo de este proyecto quede registrado como tareas en ClickUp?',
+    '',
+    '  SÍ      → corré `/clickup-setup` vos mismo, ahora.',
+    `  NO      → corré \`${ctx.cli} project exclude --reason "<lo que dijo>"\``,
+    '  OMITIR  → no corras nada. Seguí con el trabajo.',
+    '',
+    'SÍ y NO quedan registrados y no se vuelve a preguntar nunca más en esta carpeta.',
+    'OMITIR no registra nada: el resto de ESTA solicitud sigue sin interrupciones, y en la',
+    'próxima se vuelve a preguntar. Se insiste a propósito hasta que haya un sí o un no,',
+    'porque un proyecto sin decidir es un proyecto donde la herramienta no hace nada y nadie',
+    'se entera.',
   ];
 
   if (sug.length) {
     const { key, entry, org } = sug[0];
     lineas.push(
-      `Detectado: este repo pertenece a **${org}**, igual que \`${key}\`, que ya está configurado`,
-      `y apunta a ${formatListPath(entry)}.`,
       '',
-      'Si va al mismo lugar, esto lo resuelve en un comando:',
+      `Dato para la pregunta: este repo es de **${org}**, igual que \`${key}\`, que ya apunta a`,
+      `${formatListPath(entry)}. Si el usuario dice que va al mismo lugar, en vez de \`/clickup-setup\`:`,
       '',
       `    ${ctx.cli} project adopt --like "${key}"`,
-      '',
     );
   }
 
   lineas.push(
-    'PREGUNTALE AL USUARIO cuál de los tres, y ejecutá su respuesta. No decidas vos.',
-    '',
-    '  1. Sí, acá se gestionan tareas',
-    '     → /clickup-setup     (pregunta la lista destino y el modo de trabajo)',
-    '',
-    '  2. No, este proyecto no usa ClickUp',
-    `     → ${ctx.cli} project exclude --reason "<motivo>"`,
-    '        Queda registrado y no se vuelve a preguntar nunca.',
-    '',
-    '  3. Ahora no',
-    `     → ${ctx.cli} project snooze --days ${dias}`,
     '',
     `Para no volver a ver esto en NINGÚN proyecto: ${ctx.cli} config set --key defaults.ask_new_projects --value false`,
+    `Para aplazarlo en ESTA carpeta por varios días: ${ctx.cli} project snooze --days <N>`,
   );
 
   err(lineas.join('\n'));

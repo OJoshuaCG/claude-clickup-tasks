@@ -296,22 +296,35 @@ hooks preguntaban lo mismo, así que el default de la herramienta era el silenci
 única forma de salir era que un humano tipeara `/clickup-setup`. Si el modelo no se acordaba de
 ofrecerlo, nunca pasaba nada — y eso es exactamente lo que pasaba.
 
-Ahora pregunta un hook, que no se olvida. **La primera vez que se escribe código real** en una
-carpeta desconocida, el candado se detiene una vez con tres salidas:
+Ahora pregunta un hook, que no se olvida. En **la primera escritura de código** de cada solicitud
+tuya, en una carpeta sin decidir, el candado se detiene con tres salidas:
 
 ```
-1. Sí, acá se gestionan tareas     → /clickup-setup
-2. No, este proyecto no usa ClickUp → clickup-flow project exclude --reason "..."
-3. Ahora no                         → clickup-flow project snooze
+Sí      → /clickup-setup                              queda registrado, no se pregunta más
+No      → clickup-flow project exclude --reason "..."  queda registrado, no se pregunta más
+Omitir  → no se corre nada                             sigue esta solicitud; en la próxima vuelve a preguntar
 ```
 
-Tres propiedades hacen que esto sea tolerable en cada repo de la máquina y no una plaga:
+**Sí y No son definitivos. Omitir no registra nada** — y por eso se vuelve a preguntar. La cadencia
+está atada al `prompt_id` del harness, que es un UUID por cada mensaje tuyo: se pregunta como mucho
+una vez por solicitud, y el resto de esa solicitud corre sin interrupciones.
 
-1. **Solo dispara ante una escritura real.** Leer, buscar y responder no la activan.
-2. **Pregunta y pospone en el mismo acto.** Si ignorás el bloqueo, el trabajo sigue: el segundo
-   intento ya no se detiene. Un candado que insiste es un candado que se desinstala.
-3. **Se apaga para toda la máquina** con
-   `clickup-flow config set --key defaults.ask_new_projects --value false`.
+Esa cadencia es deliberada y reemplaza a un diseño anterior que estuvo mal. La primera versión
+posponía **siete días** al preguntar, con el argumento de que un candado que insiste se desinstala.
+El argumento era bueno y la conclusión errónea: si ignorás la pregunta una vez, el proyecto queda
+sin decidir una semana entera y la herramienta no hace nada — que es exactamente el problema
+original, en cámara lenta. La gente no lee los avisos que puede seguir de largo. Se insiste hasta
+que haya un sí o un no, porque un proyecto sin decidir es un proyecto donde nada pasa y nadie se
+entera.
+
+Lo que evita que sea una plaga:
+
+1. **Solo dispara ante una escritura real.** Leer, buscar, investigar y responder no la activan.
+2. **Como mucho una interrupción por solicitud.** Nunca dos seguidas dentro del mismo pedido.
+3. **Dos respuestas la terminan para siempre**, y una de ellas es "no".
+4. **Se apaga para toda la máquina** con
+   `clickup-flow config set --key defaults.ask_new_projects --value false`, y para una carpeta
+   sola por varios días con `clickup-flow project snooze --days <N>`.
 
 ### Descubrimiento por organización
 
