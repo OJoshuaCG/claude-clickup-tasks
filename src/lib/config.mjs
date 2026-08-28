@@ -125,6 +125,34 @@ export function roleBehaviour(entry, config = null) {
   }
 }
 
+/**
+ * Las coordenadas del proyecto como una sola ruta legible: `Espacio › Carpeta › Lista (id)`.
+ *
+ * Cada lugar que mostraba el destino imprimía el `list_id` pelado, y en un tablero real eso es
+ * ilegible: ClickUp llama "List" a toda lista nueva, así que un workspace termina con varias
+ * listas de nombre idéntico. La carpeta es lo único que las distingue, y era justo el segmento
+ * que no se mostraba en ningún lado. El id queda al lado del nombre porque el id es lo que se
+ * pega en una URL de ClickUp.
+ *
+ * Los segmentos ausentes se OMITEN, no se rellenan: una lista que cuelga directo del espacio no
+ * tiene carpeta, y un `(sin carpeta)` nombraría una ausencia en vez de describir el lugar.
+ *
+ * El workspace no entra en la ruta a propósito: casi siempre hay uno solo, y repetirlo en cada
+ * línea es ruido. `status` y el protocolo lo muestran aparte, que es donde sirve.
+ */
+export function formatListPath(entry) {
+  const clean = (s) => (typeof s === 'string' && s.trim() ? s.trim() : null);
+  const id = entry?.list_id ? String(entry.list_id) : null;
+  const list = clean(entry?.list_name);
+  if (!id && !list) return 'sin lista';
+  // El último segmento SIEMPRE representa la lista. Sin nombre guardado cae al id: mostrar el
+  // espacio o la carpeta como último tramo sugeriría que el destino es uno de ellos, y el
+  // destino es siempre una lista.
+  const segments = [clean(entry?.space_name), clean(entry?.folder_name), list ?? `lista ${id}`];
+  const label = segments.filter(Boolean).join(' › ');
+  return id && list ? `${label} (${id})` : label;
+}
+
 export function defaultConfig() {
   return {
     version: CONFIG_VERSION,

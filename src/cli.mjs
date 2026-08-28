@@ -26,6 +26,7 @@ import {
   MODES,
   ROLES,
   roleBehaviour,
+  formatListPath,
   OVERRIDABLE,
   STATUS_ROLES,
   loadConfig,
@@ -336,7 +337,7 @@ async function cmdGuard() {
       '',
       'A) EL TRABAJO AMERITA TAREA',
       '   1. Corré `clickup-flow context` para tener las coordenadas y las reglas de este proyecto.',
-      `   2. BUSCÁ en ClickUp antes de crear nada (lista ${p.list_id ?? '<sin lista>'}): lo abierto`,
+      `   2. BUSCÁ en ClickUp antes de crear nada — en ${formatListPath(p)}: lo abierto`,
       '      sin límite de fecha, lo cerrado de la ventana configurada, y búsqueda por texto con',
       '      varios términos.',
       '   3. Si ya existe y está `in progress` o `complete` → PARÁ y avisale al usuario que ese',
@@ -391,7 +392,15 @@ function cmdStatus(args) {
   if (ctx.registered && !ctx.excluded) {
     const p = ctx.project;
     lines.push(`modo            ${p.mode}`);
+    // `status` es la vista de DIAGNÓSTICO: acá van los cuatro niveles con su id, no la ruta
+    // compacta. Cuando algo apunta al lugar equivocado, el id es el dato que se necesita.
+    lines.push(`workspace       ${p.workspace_id ?? config.defaults.workspace_id ?? '— FALTA'}`);
     lines.push(`espacio         ${p.space_name ?? '—'} (${p.space_id ?? '—'})`);
+    // La carpeta es OPCIONAL en ClickUp: una lista puede colgar directo del espacio. Solo se
+    // muestra si existe — una fila vacía diría que falta algo que no falta.
+    if (p.folder_id || p.folder_name) {
+      lines.push(`carpeta         ${p.folder_name ?? '—'} (${p.folder_id ?? '—'})`);
+    }
     lines.push(`lista           ${p.list_name ?? '—'} (${p.list_id ?? '—'})`);
     if (p.mode === MODES.UMBRELLA) lines.push(`paraguas        ${p.umbrella_task_id ?? '— FALTA'}`);
     const rb = roleBehaviour(p, config);
@@ -757,8 +766,8 @@ function cmdProject(args) {
         p.mode === MODES.EXCLUDED
           ? `excluido${p.excluded_reason ? ` — ${p.excluded_reason}` : ''}`
           : p.mode === MODES.UMBRELLA
-            ? `paraguas ${p.umbrella_task_id ?? '—'} en lista ${p.list_id ?? '—'}`
-            : `lista ${p.list_id ?? '—'}`;
+            ? `paraguas ${p.umbrella_task_id ?? '—'} en ${formatListPath(p)}`
+            : formatListPath(p);
       say(`${String(p.mode).padEnd(9)} ${key}\n          ${where}`);
     }
     return 0;
@@ -900,6 +909,13 @@ function cmdProject(args) {
     if (patch.workspace_id === undefined && previo.workspace_id === undefined) {
       patch.workspace_id = config.defaults.workspace_id;
     }
+    // El default global se SIEMBRA con el primer workspace que llegue. Sin esto, el fallback de
+    // arriba leía un `defaults.workspace_id` que NINGÚN código escribía nunca: nacía `null` en
+    // `defaultConfig()` y moría `null`. Era un fallback que siempre devolvía nada. Sembrándolo,
+    // el segundo proyecto lo hereda y deja de haber una pregunta que se repite sin motivo.
+    if (patch.workspace_id && !config.defaults.workspace_id) {
+      config.defaults.workspace_id = String(patch.workspace_id);
+    }
 
     asigna('space_id', 'space-id');
     asigna('space_name', 'space-name');
@@ -1002,7 +1018,7 @@ function cmdProject(args) {
     const entry = upsertProject(config, cwd, patch);
     saveConfig(config);
     say(`Proyecto configurado: ${entry.path}`);
-    say(`  modo ${entry.mode} · lista ${entry.list_id}${entry.umbrella_task_id ? ` · paraguas ${entry.umbrella_task_id}` : ''}`);
+    say(`  modo ${entry.mode} · ${formatListPath(entry)}${entry.umbrella_task_id ? ` · paraguas ${entry.umbrella_task_id}` : ''}`);
     if (!identityReady(config)) {
       say('');
       say('⚠ La identidad de ClickUp sigue sin resolver: resolvela antes de asignar nada.');
@@ -1282,6 +1298,13 @@ function cmdDoctor() {
       if (p.mode !== MODES.EXCLUDED && !p.list_id) {
         lines.push(`                ⚠ ${key}: sin list_id`);
         problems++;
+      }
+      // Un AVISO, no un problema: con un solo workspace el MCP lo resuelve solo, así que hoy
+      // funciona igual. Pero es el dato que falta el día que la cuenta suma un segundo workspace
+      // y las herramientas que lo piden explícito dejan de poder adivinar. Se ve, no bloquea.
+      if (p.mode !== MODES.EXCLUDED && !p.workspace_id && !config.defaults.workspace_id) {
+        lines.push(`                · ${key}: sin workspace_id (ni default global)`);
+        warnings++;
       }
       // Una contraparte que no puede RECIBIR solo es un PROBLEMA para quien iba a entregarle.
       //

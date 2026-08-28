@@ -14,6 +14,7 @@ import os from 'node:os';
 import path from 'node:path';
 import { execFileSync, spawnSync } from 'node:child_process';
 import { fileURLToPath } from 'node:url';
+import { formatListPath } from '../src/lib/config.mjs';
 
 const REPO = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
 const sandbox = fs.mkdtempSync(path.join(os.tmpdir(), 'cf-esq-'));
@@ -330,6 +331,101 @@ check('el protocolo no filtra el id de ClickUp de otra persona del equipo', () =
   escribirCfg(BUENO);
 });
 
+console.log('\n=== CORRIDA 8: LA RUTA DEL DESTINO ===\n');
+
+// Todo lugar que muestra dónde caen las tareas imprimía el `list_id` pelado. En un tablero real
+// eso no identifica nada: ClickUp llama "List" a toda lista nueva, así que varias listas comparten
+// nombre y solo la carpeta las distingue.
+
+check('la ruta completa lleva espacio, carpeta, lista e id', () => {
+  const s = formatListPath({
+    space_name: 'Acme',
+    folder_name: 'Plataforma',
+    list_name: 'Gateway',
+    list_id: '4000000001',
+  });
+  assert(s === 'Acme › Plataforma › Gateway (4000000001)', `salió "${s}"`);
+});
+
+check('una lista folderless muestra dos segmentos, sin rellenar el hueco', () => {
+  const s = formatListPath({ space_name: 'Acme', list_name: 'Backlog', list_id: '42' });
+  assert(s === 'Acme › Backlog (42)', `salió "${s}"`);
+  assert(!/carpeta|—|undefined|null/i.test(s), `nombró la ausencia de carpeta: "${s}"`);
+});
+
+check('dos listas homónimas en carpetas distintas NO producen la misma ruta', () => {
+  const base = { space_name: 'Acme', list_name: 'List' };
+  const a = formatListPath({ ...base, folder_name: 'Facturación', list_id: '4000000002' });
+  const b = formatListPath({ ...base, folder_name: 'Soporte', list_id: '4000000003' });
+  assert(a !== b, 'la carpeta no desambiguó: dos listas "List" se ven idénticas');
+});
+
+check('sin nombre de lista, el ÚLTIMO segmento sigue siendo la lista y no la carpeta', () => {
+  const s = formatListPath({ space_name: 'Acme', folder_name: 'Plataforma', list_id: '77' });
+  assert(s.endsWith('lista 77'), `el último tramo no es la lista: "${s}"`);
+  assert(!s.endsWith('Plataforma'), `la carpeta quedó como destino: "${s}"`);
+});
+
+check('sin lista ni id, degrada en vez de romper', () => {
+  for (const e of [undefined, null, {}, { space_name: 'Acme' }]) {
+    assert(formatListPath(e) === 'sin lista', `${JSON.stringify(e)} → "${formatListPath(e)}"`);
+  }
+});
+
+check('`status` muestra el workspace y la carpeta cuando existen', () => {
+  escribirCfg(BUENO);
+  const r0 = run([
+    'project', 'set', '--mode', 'tasks', '--list-id', '4000000001', '--list-name', 'Gateway',
+    '--space-id', '2000000001', '--space-name', 'Acme',
+    '--folder-id', '3000000001', '--folder-name', 'Plataforma',
+    '--workspace-id', '1000000001', '--role', 'fullstack',
+  ]);
+  assert(r0.code === 0, `project set falló: ${r0.err}`);
+  const r = run(['status']);
+  assert(r.code === 0, `exit ${r.code}`);
+  assert(/carpeta\s+Plataforma/.test(r.out), `status no muestra la carpeta:\n${r.out}`);
+  assert(/workspace\s+1000000001/.test(r.out), `status no muestra el workspace:\n${r.out}`);
+});
+
+check('una lista folderless NO inventa una fila de carpeta en `status`', () => {
+  const r0 = run([
+    'project', 'set', '--mode', 'tasks', '--list-id', '55', '--list-name', 'Backlog',
+    '--space-id', '1', '--space-name', 'Acme', '--folder-id', '', '--folder-name', '',
+    '--role', 'fullstack',
+  ]);
+  assert(r0.code === 0, `project set falló: ${r0.err}`);
+  const r = run(['status']);
+  assert(!/^carpeta\s/m.test(r.out), `inventó una carpeta vacía:\n${r.out}`);
+});
+
+check('el primer --workspace-id SIEMBRA el default global, y el segundo proyecto lo hereda', () => {
+  escribirCfg(BUENO);
+  const c = leerCfg();
+  c.defaults.workspace_id = null;
+  escribirCfg(c);
+
+  run(['project', 'set', '--mode', 'tasks', '--list-id', '900', '--workspace-id', '1000000001', '--role', 'fullstack']);
+  assert(
+    leerCfg().defaults.workspace_id === '1000000001',
+    `el default global sigue en ${JSON.stringify(leerCfg().defaults.workspace_id)}: el fallback nunca sirve`,
+  );
+
+  const otro = path.join(sandbox, 'otro-proj');
+  fs.mkdirSync(otro, { recursive: true });
+  run(['project', 'set', '--mode', 'tasks', '--list-id', '901', '--role', 'fullstack'], otro);
+  const heredado = Object.values(leerCfg().projects).find((p) => p.list_id === '901');
+  assert(heredado?.workspace_id === '1000000001', `el segundo proyecto no heredó: ${JSON.stringify(heredado?.workspace_id)}`);
+});
+
+check('la siembra NO pisa un default global que ya estaba puesto', () => {
+  const c = leerCfg();
+  c.defaults.workspace_id = 'YA-ESTABA';
+  escribirCfg(c);
+  run(['project', 'set', '--mode', 'tasks', '--list-id', '902', '--workspace-id', '1000000001', '--role', 'fullstack']);
+  assert(leerCfg().defaults.workspace_id === 'YA-ESTABA', 'la siembra pisó un valor existente');
+  escribirCfg(BUENO);
+});
+
 console.log(`\n${pass} pasaron, ${fail} fallaron\n`);
 if (fail) {
   for (const f of fallos) console.log(`  - ${f}`);
@@ -337,4 +433,4 @@ if (fail) {
   process.exit(1);
 }
 fs.rmSync(sandbox, { recursive: true, force: true });
-console.log('corridas 6-7: sin hallazgos.\n');
+console.log('corridas 6-8: sin hallazgos.\n');
