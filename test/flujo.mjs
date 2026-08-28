@@ -91,6 +91,22 @@ function cli(args, cwd) {
   });
 }
 
+/**
+ * Simula lo que hace el hook `PostToolUse` cuando el modelo muta ClickUp por MCP.
+ *
+ * Sin esto, el flujo end-to-end no puede cerrar una tarea: `release` ahora exige que el harness
+ * haya VISTO una mutación sobre ella. Y esa exigencia es justamente el punto — antes el cierre
+ * era una declaración del modelo, ahora es evidencia. El test tiene que recorrer el camino real.
+ */
+function mutacionMcp(cwd, taskId, tool = 'mcp__claude_ai_ClickUp__clickup_update_task') {
+  execFileSync('node', [CLI, 'sync-hook'], {
+    encoding: 'utf8',
+    env,
+    input: JSON.stringify({ cwd, tool_name: tool, tool_input: { taskId }, tool_response: { id: taskId, name: 'x' } }),
+    stdio: ['pipe', 'pipe', 'pipe'],
+  });
+}
+
 function guard(cwd, file) {
   try {
     execFileSync('node', [CLI, 'guard'], {
@@ -293,6 +309,9 @@ step('el claim es por proyecto: no desbloquea los otros', () => {
 });
 
 step('cerrar vuelve a activar el candado', () => {
+  // El camino real: el modelo cierra la tarea por MCP, el hook lo registra, y recién ahí se
+  // suelta el claim. Sin la mutación, `release` se niega — y hace bien.
+  mutacionMcp(P.mensajeria, '86abc0002');
   cli(['release', '--cwd', P.mensajeria], P.mensajeria);
   const r = guard(P.mensajeria, path.join(P.mensajeria, 'app/main.py'));
   assert(r.blocked, 'no volvió a frenar después de cerrar');

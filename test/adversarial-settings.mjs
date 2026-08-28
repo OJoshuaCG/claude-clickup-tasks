@@ -25,6 +25,7 @@ const {
   unmergePermissions,
   inspectInstalled,
   hookSpecs,
+  HOOK_COUNT,
   HOOK_MARKER,
 } = await import('../src/lib/settings.mjs');
 const { settingsPath } = await import('../src/lib/paths.mjs');
@@ -79,8 +80,8 @@ for (const [label, obj] of MALFORMED) {
     const { settings, error } = readSettings();
     assert(!error, `readSettings falló: ${error}`);
     const added = installHooks(settings, CLI);
-    assert(added.length === 3, `registró ${added.length} hooks en vez de 3`);
-    assert(ours(settings) === 3, `inspectInstalled ve ${ours(settings)}`);
+    assert(added.length === HOOK_COUNT, `registró ${added.length} en vez de ${HOOK_COUNT}`);
+    assert(ours(settings) === HOOK_COUNT, `inspectInstalled ve ${ours(settings)}`);
     // La clave del usuario tiene que seguir ahí.
     assert(settings.model === 'opus', 'perdió una clave del usuario');
     writeSettings(settings);
@@ -212,7 +213,7 @@ check('installHooks diez veces seguidas deja exactamente 3', () => {
   write({ model: 'opus' });
   const { settings } = readSettings();
   for (let i = 0; i < 10; i++) installHooks(settings, CLI);
-  assert(ours(settings) === 3, `quedaron ${ours(settings)} hooks`);
+  assert(ours(settings) === HOOK_COUNT, `quedaron ${ours(settings)} hooks`);
 });
 
 check('removeHooks no borra un hook del usuario que solo se parece', () => {

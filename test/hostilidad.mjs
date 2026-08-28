@@ -50,7 +50,7 @@ function run(cwd, args, input) {
 function tieneStack(t) {
   return /\n\s+at .+:\d+:\d+/.test(t);
 }
-const HOOKS = ['session-start', 'prompt-hook', 'guard'];
+const HOOKS = ['session-start', 'guard', 'sync-hook', 'stop-hook', 'prompt-hook'];
 const posix = process.platform !== 'win32' && process.getuid?.() !== 0;
 
 console.log('\n=== EL SISTEMA DE ARCHIVOS EN CONTRA ===\n');
@@ -271,7 +271,8 @@ check('stdin cerrado sin datos, y stdin con basura binaria', () => {
   // que nunca revienta y que, si bloquea, lo explique.
   for (const h of HOOKS) {
     const a = run(proj, [h], '');
-    const permitido = h === 'guard' ? [0, 2] : [0];
+    // `guard` y `stop-hook` son los dos que pueden decidir bloquear (exit 2).
+    const permitido = h === 'guard' || h === 'stop-hook' ? [0, 2] : [0];
     assert(permitido.includes(a.code), `${h} con stdin vacío → exit ${a.code}: ${a.err.slice(0,200)}`);
     if (a.code === 2) assert(a.err.trim().length > 30, `el guard bloqueó sin explicar: ${a.err}`);
     const b = run(proj, [h], Buffer.from([0x00, 0xff, 0xfe, 0x01, 0x7f]).toString('binary'));
@@ -281,7 +282,7 @@ check('stdin cerrado sin datos, y stdin con basura binaria', () => {
 });
 
 check('un hook nunca escribe en stdout algo que no sea para el agente', () => {
-  // El guard bloquea por stderr con exit 2; session-start y prompt-hook inyectan contexto por
+  // El guard bloquea por stderr con exit 2; session-start inyecta contexto por
   // stdout. Lo que no puede pasar es que el guard escupa ruido por stdout cuando NO bloquea.
   // Con ruta RELATIVA, que es el caso que estaba roto: isTrivialTarget exigía un separador
   // delante y 'CLAUDE.md' nunca matcheaba, así que el guard bloqueaba editar el archivo que

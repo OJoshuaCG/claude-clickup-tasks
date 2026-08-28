@@ -145,7 +145,10 @@ check('el instalador corrido 3 veces no duplica hooks ni acumula backups sin top
 check('los hooks corridos 50 veces no dejan basura', () => {
   const antes = huella();
   for (let i = 0; i < 50; i++) {
-    for (const h of ['session-start', 'prompt-hook']) {
+    // `stop-hook` queda afuera a propósito: lleva un contador anti-loop por sesión, así que
+    // escribir en cada invocación es su comportamiento correcto, no basura. Los otros tres tienen
+    // que ser puramente de lectura mientras no cambie nada.
+    for (const h of ['session-start', 'guard', 'sync-hook']) {
       run([h], proj, JSON.stringify({ cwd: proj, prompt: 'hola', tool_input: {} }));
     }
   }

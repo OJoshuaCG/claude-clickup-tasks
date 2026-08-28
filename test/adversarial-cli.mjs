@@ -78,7 +78,7 @@ function run(args, input) {
   return { code: r.status ?? -1, stdout: r.stdout ?? '', stderr: r.stderr ?? '' };
 }
 
-const HOOKS = ['session-start', 'prompt-hook', 'guard'];
+const HOOKS = ['session-start', 'guard', 'sync-hook', 'stop-hook', 'prompt-hook'];
 
 console.log('\nLOS HOOKS NUNCA REVIENTAN (la regla de oro)\n');
 

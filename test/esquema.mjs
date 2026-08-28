@@ -124,7 +124,7 @@ check('cada sección con el tipo equivocado degrada sin romper', () => {
           `${sec}=${JSON.stringify(basura)} + ${cmd.join(' ')} filtró un stack`,
         );
       }
-      for (const h of ['session-start', 'prompt-hook', 'guard']) {
+      for (const h of ['session-start', 'guard', 'sync-hook', 'stop-hook']) {
         const r = run([h], proj, JSON.stringify({ cwd: proj, tool_input: { file_path: 'a.js' } }));
         assert(
           r.code === 0 || r.code === 2,

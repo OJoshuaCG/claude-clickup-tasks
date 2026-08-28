@@ -63,10 +63,13 @@ const projectA = path.join(sandbox, 'proyecto-tasks');
 const projectB = path.join(sandbox, 'proyecto-umbrella');
 const projectC = path.join(sandbox, 'proyecto-excluido');
 const projectD = path.join(sandbox, 'proyecto-sin-configurar');
+// Otro proyecto virgen, para probar que una LECTURA nunca dispara la pregunta de alta: projectD
+// ya quedó pospuesto tras su primera escritura, así que ahí el silencio no probaría nada.
+const projectE = path.join(sandbox, 'proyecto-solo-lectura');
 const projRol = path.join(sandbox, 'proyecto-rol');
 const projRol2 = path.join(sandbox, 'proyecto-rol-2');
 
-for (const dir of [fakeClaude, projectA, projectB, projectC, projectD, projRol, projRol2]) {
+for (const dir of [fakeClaude, projectA, projectB, projectC, projectD, projectE, projRol, projRol2]) {
   fs.mkdirSync(dir, { recursive: true });
 }
 fs.mkdirSync(path.join(projectA, 'src', 'deep'), { recursive: true });
@@ -268,15 +271,25 @@ check('conserva los hooks preexistentes del usuario', () => {
   assert(commands.includes('echo hook-del-usuario'), 'se perdió el SessionStart del usuario');
 });
 
-check('registra los tres hooks propios', () => {
+check('registra sus cuatro hooks propios', () => {
   const s = readSettings();
-  assertEqual(ourHooks().length, 3, 'no quedaron exactamente 3 hooks nuestros');
+  assertEqual(ourHooks().length, 4, 'no quedaron exactamente 4 hooks nuestros');
   const flat = JSON.stringify(s.hooks);
   assert(flat.includes('session-start'), 'falta session-start');
-  assert(flat.includes('prompt-hook'), 'falta prompt-hook');
   assert(flat.includes('guard'), 'falta guard');
-  const pre = s.hooks.PreToolUse.find((g) => g.matcher === 'Edit|Write|MultiEdit|NotebookEdit');
-  assert(pre, 'el guard no quedó con el matcher de edición');
+  assert(flat.includes('sync-hook'), 'falta sync-hook (la evidencia del PostToolUse)');
+  assert(flat.includes('stop-hook'), 'falta stop-hook (la obligación de cerrar)');
+  assert(!flat.includes('cli.mjs" prompt-hook'), 'el hook por prompt no debería instalarse más');
+
+  // Bash en el matcher no es un detalle: sin él el candado es decorativo, porque el modo
+  // bypassPermissions le RECOMIENDA al agente escribir con sed, heredocs y scripts cortos.
+  const pre = s.hooks.PreToolUse.find(
+    (g) => g.matcher === 'Edit|Write|MultiEdit|NotebookEdit|Bash',
+  );
+  assert(pre, 'el guard no quedó con Bash en el matcher');
+
+  const post = (s.hooks.PostToolUse ?? []).find((g) => /clickup_create_task/.test(g.matcher ?? ''));
+  assert(post, 'el sync-hook no quedó atado a las herramientas de escritura del MCP');
 });
 
 check('conserva permisos allow y deny del usuario', () => {
@@ -302,33 +315,64 @@ check('agrega permisos de lectura de ClickUp', () => {
 check('reinstalar es idempotente: no duplica hooks', () => {
   run([INSTALLER, '--yes']);
   const mine = ourHooks();
-  assertEqual(mine.length, 3, `quedaron ${mine.length} hooks nuestros en vez de 3`);
+  assertEqual(mine.length, 4, `quedaron ${mine.length} hooks nuestros en vez de 4`);
   const events = mine.map((h) => h.event).sort().join(',');
-  assertEqual(events, 'PreToolUse,SessionStart,UserPromptSubmit', 'eventos registrados');
+  assertEqual(events, 'PostToolUse,PreToolUse,SessionStart,Stop', 'eventos registrados');
   // and the user's own hooks survive a second pass
   const flat = JSON.stringify(readSettings().hooks);
   assert(flat.includes('codegraph prompt-hook'), 'la reinstalación perdió el hook del usuario');
   assert(flat.includes('gentle-ai skill-registry'), 'la reinstalación perdió otro hook del usuario');
 });
 
-process.stdout.write('\nEL CANDADO: FAIL OPEN CUANDO NO ESTÁ CONFIGURADO\n');
+process.stdout.write('\nEL CANDADO EN UN PROYECTO SIN CONFIGURAR: PREGUNTA UNA VEZ\n');
 
-check('guard NO bloquea en un proyecto sin configurar', () => {
-  const r = hook('guard', {
-    cwd: projectD,
+const escribirEn = (dir, archivo = 'app.js') =>
+  hook('guard', {
+    cwd: dir,
     tool_name: 'Write',
-    tool_input: { file_path: path.join(projectD, 'app.js') },
+    tool_input: { file_path: path.join(dir, archivo) },
   });
-  assertEqual(r.code, 0, `bloqueó un proyecto sin configurar: ${r.stderr}`);
 
-  // El exit 0 no alcanza como prueba: un crash interno también sale con 0, porque el catch-all
-  // de los hooks lo convierte para no romper el turno. Sin esta aserción, un guard reventado es
-  // indistinguible de un guard que decidió correctamente permitir — el candado dejaría de
-  // proteger en silencio. Lo encontró un test de mutación.
+check('la PRIMERA escritura en un proyecto desconocido pregunta y bloquea', () => {
+  // Este es el comportamiento que la herramienta NO tenía, y su ausencia era el motivo por el que
+  // nunca se activó en el segundo proyecto: `pending` y `excluded` se comportaban idéntico, así
+  // que el default era el silencio permanente y la única salida era que un humano tipeara
+  // `/clickup-setup`. Ahora pregunta un hook, que no se olvida.
+  const r = escribirEn(projectD);
+  assertEqual(r.code, 2, `no preguntó por un proyecto desconocido: ${r.stdout}`);
+  assert(/clickup-setup/.test(r.stderr), 'no ofrece configurarlo');
+  assert(/exclude/.test(r.stderr), 'no ofrece excluirlo');
+  assert(/snooze/.test(r.stderr), 'no ofrece posponerlo');
+
+  // El exit 2 no alcanza como prueba: un crash interno sale con 0 por el catch-all, pero un
+  // mensaje de fallo interno acompañando un bloqueo también sería un bug distinto.
+  assert(
+    !r.stderr.includes('falló internamente'),
+    `el guard reventó en vez de preguntar: ${r.stderr}`,
+  );
+});
+
+check('la SEGUNDA escritura ya no bloquea: pregunta y pospone en el mismo acto', () => {
+  // La propiedad que hace tolerable un candado que corre en cada repo de la máquina. Si
+  // insistiera, se desinstalaría.
+  const r = escribirEn(projectD, 'otro.js');
+  assertEqual(r.code, 0, `siguió bloqueando después de preguntar: ${r.stderr}`);
   assert(
     !r.stderr.includes('falló internamente'),
     `el guard reventó y el catch-all lo disfrazó de permiso: ${r.stderr}`,
   );
+});
+
+check('un `ls` en un proyecto desconocido nunca pregunta nada', () => {
+  // Solo una ESCRITURA real dispara la pregunta. Interrumpir una lectura con una consulta sobre
+  // ClickUp es exactamente cómo se gana el derecho a que te desinstalen.
+  const r = hook('guard', {
+    cwd: projectE,
+    tool_name: 'Bash',
+    tool_input: { command: 'ls -la && git status' },
+  });
+  assertEqual(r.code, 0, 'preguntó por una lectura');
+  assertEqual(r.stderr.trim(), '', 'dijo algo ante una lectura');
 });
 
 check('prompt-hook queda callado en un proyecto sin configurar', () => {
@@ -576,10 +620,21 @@ check('claim desbloquea la escritura', () => {
   assertEqual(r.code, 0, `siguió bloqueando con tarea reclamada: ${r.stderr}`);
 });
 
-check('prompt-hook recuerda la tarea en curso', () => {
-  const r = hook('prompt-hook', { cwd: projectA });
+check('session-start recuerda la tarea en curso', () => {
+  // Antes lo hacía el hook por prompt, en CADA turno de CADA proyecto de la máquina. Se fue por
+  // costo (0,14 s y ~70 palabras de contexto por turno) y su trabajo quedó acá, que corre una vez
+  // por sesión — y también al compactar, que era su única justificación real.
+  const r = hook('session-start', { cwd: projectA });
   assert(r.stdout.includes('86abc123'), 'no menciona el id de la tarea');
   assert(r.stdout.includes('TAREA EN CURSO'), 'no avisa que hay tarea en curso');
+});
+
+check('el hook por prompt quedó obsoleto pero no rompe un settings.json viejo', () => {
+  // Una instalación anterior puede seguir invocándolo. Un comando inexistente sería un error en
+  // cada turno hasta que el usuario reinstale.
+  const r = hook('prompt-hook', { cwd: projectA });
+  assertEqual(r.code, 0, 'prompt-hook debería salir con 0');
+  assertEqual(r.stdout.trim(), '', 'prompt-hook ya no debería decir nada');
 });
 
 check('un segundo claim distinto se RECHAZA, no pisa al primero', () => {
@@ -608,8 +663,9 @@ check('--force reemplaza el claim, avisando de lo que queda huérfano', () => {
   });
   assert(out.includes('Reemplazado por --force'), 'no avisa del reemplazo');
   assert(out.includes('sin nadie encima'), 'no advierte que la anterior quedó abierta');
-  // Volver al estado que esperan los tests siguientes.
-  cli(['release', '--cwd', projectA], { cwd: projectA });
+  // Volver al estado que esperan los tests siguientes. `--force` porque el harness nunca vio
+  // una mutación MCP sobre estas tareas de prueba, y sin él `release` ahora se niega.
+  cli(['release', '--force', '--cwd', projectA], { cwd: projectA });
   cli(['claim', '--task-id', '86abc123', '--title', 'Arreglar el ruteo', '--cwd', projectA], {
     cwd: projectA,
   });
@@ -630,8 +686,57 @@ check('release con el id equivocado NO borra el claim de otra sesión', () => {
   assert(st.includes('86abc123'), 'borró el claim de la otra sesión');
 });
 
-check('release con el id correcto sí libera', () => {
-  const out = cli(['release', '--task-id', '86abc123', '--cwd', projectA], { cwd: projectA });
+check('sin plomería probada, release NO se niega: falla abierto', () => {
+  // La válvula de seguridad. La verificación depende de que el matcher del `PostToolUse` case el
+  // nombre de las herramientas del conector; si no casa, exigir evidencia trabaría cada proyecto
+  // acusando al usuario de algo que hizo bien. Mientras el hook no haya corrido NUNCA, no se
+  // exige nada — es la misma regla de "fallar abierto" que gobierna el resto del candado.
+  // `doctor` sale con 1 cuando encuentra problemas, y `run` usa execFileSync, que en ese caso
+  // lanza. La salida sigue estando en el error: es lo que hay que leer.
+  let doc = '';
+  try {
+    doc = cli(['doctor', '--cwd', projectA], { cwd: projectA });
+  } catch (err) {
+    doc = err.stdout?.toString() ?? '';
+  }
+  assert(/DESARMADA/.test(doc), 'doctor no avisa que la obligación está desarmada');
+
+  const out = cli(['release', '--cwd', projectA], { cwd: projectA });
+  assert(/nunca corrió/.test(out), 'no explica que la culpa es de la plomería, no del usuario');
+
+  // Volver al estado que espera el test siguiente, ya con la plomería demostrada: una mutación
+  // sobre cualquier tarea prueba que el hook corre.
+  hook('sync-hook', {
+    cwd: projectA,
+    tool_name: 'mcp__claude_ai_ClickUp__clickup_update_task',
+    tool_input: { taskId: 'PLOMERIA-OK' },
+    tool_response: { id: 'PLOMERIA-OK', name: 'prueba de que el hook corre' },
+  });
+  cli(['claim', '--task-id', '86abc123', '--title', 'Arreglar el ruteo', '--cwd', projectA], {
+    cwd: projectA,
+  });
+});
+
+check('release SIN evidencia de ClickUp se NIEGA a soltar', () => {
+  // El chequeo que convierte el cierre en algo verificado en vez de anunciado: si no hay ninguna
+  // mutación MCP registrada para la tarea, soltar el claim borraría la única señal de que este
+  // trabajo pasó, y el tablero quedaría sin rastro.
+  let threw = false;
+  try {
+    cli(['release', '--task-id', '86abc123', '--cwd', projectA], { cwd: projectA });
+  } catch (err) {
+    threw = true;
+    const msg = err.stderr?.toString() ?? '';
+    assert(/ninguna mutación/i.test(msg), 'no explica que falta la evidencia');
+    assert(msg.includes('--force'), 'no ofrece la salida documentada');
+  }
+  assert(threw, 'soltó una tarea sin ninguna evidencia de que se tocó en ClickUp');
+});
+
+check('release con el id correcto sí libera (con --force, sin evidencia)', () => {
+  const out = cli(['release', '--task-id', '86abc123', '--force', '--cwd', projectA], {
+    cwd: projectA,
+  });
   assert(out.includes('liberado'), 'no liberó con el id correcto');
   // Reclamar de nuevo para el test siguiente.
   cli(['claim', '--task-id', '86abc123', '--title', 'Arreglar el ruteo', '--cwd', projectA], {
@@ -640,7 +745,7 @@ check('release con el id correcto sí libera', () => {
 });
 
 check('release vuelve a activar el candado', () => {
-  cli(['release', '--cwd', projectA], { cwd: projectA });
+  cli(['release', '--force', '--cwd', projectA], { cwd: projectA });
   const r = hook('guard', {
     cwd: projectA,
     tool_name: 'Write',
