@@ -57,6 +57,41 @@ check('softWrap con vacío devuelve una línea vacía, no un array vacío', () =
   assert(TUI.softWrap('', 10).length === 1, 'devolvió array vacío');
 });
 
+check('softWrap conserva la sangría de la línea original', () => {
+  // El bug: `split(/\s+/)` sobre todo el texto se comía los espacios del principio, así que las
+  // continuaciones arrancaban pegadas al borde. Una lista indentada dentro de un `box` se
+  // desarmaba sola en cuanto UNO de sus ítems se pasaba de ancho: un ítem quedaba alineado y el
+  // de al lado no, sin que nada avisara. Apareció escribiendo el cuadro del candado.
+  const lineas = TUI.softWrap('  ítem indentado con bastante texto para que tenga que cortarse', 30);
+  assert(lineas.length > 1, 'no llegó a cortar, el caso no se está probando');
+  for (const [i, l] of lineas.entries()) {
+    assert(l.startsWith('  '), `la línea ${i} perdió la sangría: "${l}"`);
+  }
+});
+
+check('softWrap alinea las continuaciones debajo del TEXTO, no del bullet', () => {
+  // Si la continuación arranca en la columna del bullet, la lista se lee como un párrafo con un
+  // símbolo suelto adelante.
+  for (const bullet of ['· ', '- ', '* ', '1. ']) {
+    const lineas = TUI.softWrap(`${bullet}texto suficientemente largo como para cortarse`, 24);
+    assert(lineas.length > 1, `no cortó con el bullet "${bullet}"`);
+    const sangriaEsperada = ' '.repeat(bullet.length);
+    for (const l of lineas.slice(1)) {
+      assert(
+        l.startsWith(sangriaEsperada) && l[bullet.length] !== ' ',
+        `la continuación de "${bullet}" no quedó alineada bajo el texto: "${l}"`,
+      );
+    }
+  }
+});
+
+check('softWrap con un ancho imposible devuelve la línea entera, sin bucle', () => {
+  // Un `max` menor que la sangría es un error del llamador, pero acá no se cuelga: partir por
+  // caracteres sería peor que devolver la línea larga.
+  const lineas = TUI.softWrap('        muy indentado', 4);
+  assert(lineas.length === 1, `devolvió ${lineas.length} líneas en vez de una`);
+});
+
 check('las cajas alinean con acentos y emoji', () => {
   // Con colores apagados (NO_COLOR en el suite) el ancho visible es el largo del string.
   const lineas = [];

@@ -367,25 +367,56 @@ async function interview(prompt, existing) {
   });
 
   heading('3. El candado');
+  // ESTE CUADRO SE REESCRIBIÓ, y vale decir por qué: el autor de la herramienta lo leyó y no
+  // entendió qué significaba. Si le pasa a quien lo escribió, le pasa a todos.
+  //
+  // La versión anterior fallaba en tres cosas, y las tres son el mismo error de fondo — explicar
+  // el mecanismo en vez de la consecuencia:
+  //
+  //   1. Abría con "un hook que ejecuta el harness (no el modelo)". Esa distinción le importa a
+  //      quien programó esto. A quien está instalando le importa qué le va a pasar cuando trabaje.
+  //   2. Cargaba todo el significado en dos términos —"tarea reclamada" y "exención declarada"—
+  //      que en el paso 3 de la instalación NO APARECIERON NUNCA ANTES. Es pedirle al lector que
+  //      ya sepa lo que le estás por explicar.
+  //   3. No había una escena. Describía una regla en abstracto en vez de mostrar el momento.
+  //
+  // Ahora abre por lo que el usuario va a ver, define los dos términos donde se usan, y el
+  // mecanismo baja a una nota al pie para quien le interese.
+  const horasExencion = existing?.defaults?.exemption_hours ?? 8;
   box(
-    'Qué hace, dicho sin adornos',
+    'Qué vas a ver cuando esté activo',
     [
-      'Un hook que ejecuta el harness (no el modelo) cancela las escrituras si el proyecto está ' +
-        'configurado y no hay ni tarea reclamada ni exención declarada.',
+      // Las líneas van cortadas a mano cerca de las 70 columnas para que el corte caiga donde
+      // ayuda a leer, no donde toque. `softWrap` ya conserva la sangría si alguna se pasa, así
+      // que esto es preferencia de composición y no un requisito — ver softWrap en tui.mjs.
+      'Le pedís a Claude un cambio en un proyecto configurado. Antes de',
+      'escribir la primera línea se frena y avisa que falta decidir si ese',
+      'trabajo va al tablero.',
       '',
-      'Es lo ÚNICO del protocolo que el modelo no puede saltearse: todo lo demás es una ' +
-        'instrucción, y una instrucción se diluye cuando el contexto se comprime en una sesión ' +
-        'larga.',
+      'Dos salidas, y cualquiera de las dos destraba en segundos:',
       '',
-      'Solo actúa en proyectos que configures. En cualquier otra carpeta de la máquina no hace ' +
-        'nada.',
+      '  RECLAMAR LA TAREA',
+      '  La tarea existe en ClickUp, es tuya, y la estás haciendo ahora.',
+      '',
+      '  DECLARAR UNA EXENCIÓN',
+      '  Este cambio no amerita tarea, y queda escrito el motivo. Sirve para',
+      '  un typo, un ajuste del entorno local, o algo pedido dentro de un',
+      `  trabajo que ya reclamaste. Vence sola a las ${horasExencion}h, a propósito: una`,
+      '  exención olvidada dejaría el candado abierto para siempre y sin que',
+      '  nadie se entere.',
+      '',
+      'NO frena leer, buscar, investigar ni responder. Solo escribir.',
+      'NO existe en las carpetas que no configures: ahí no hace nada.',
     ],
     { color: c.yellow },
   );
+  note('Lo ejecuta el harness de Claude Code, no el modelo. Por eso es lo');
+  note('único del protocolo que no se diluye cuando una sesión larga');
+  note('comprime su contexto: no es una instrucción, es una cancelación.');
 
   answers.blockWrites = await prompt.confirm('¿Activar el candado?', {
     def: existing?.defaults?.block_writes_without_task ?? true,
-    hint: 'Siempre se puede declarar una exención con su motivo cuando el trabajo no amerita tarea.',
+    hint: 'Con el candado apagado el protocolo sigue existiendo, pero nada obliga a cumplirlo.',
   });
 
   heading('4. La ventana de búsqueda');

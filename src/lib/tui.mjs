@@ -82,22 +82,53 @@ export function box(title, lines, { color = c.cyan, inner = 74 } = {}) {
   say(color(bottom));
 }
 
+/**
+ * Corta un texto a `max` columnas **conservando la sangría de la línea original**.
+ *
+ * Lo de la sangría no es un adorno. La versión anterior hacía `split(/\s+/)` sobre todo el texto,
+ * así que los espacios del principio desaparecían y las continuaciones arrancaban pegadas al
+ * borde. Efecto práctico: una lista indentada dentro de un `box` se desarmaba sola en cuanto UNO
+ * de sus ítems se pasaba de ancho — un ítem quedaba alineado y el de al lado no, sin que nada
+ * avisara. Se descubrió escribiendo el cuadro del candado: la línea de la exención perdió su
+ * sangría y quedó en otra columna que sus tres hermanas.
+ *
+ * Se conserva también el bullet: si la línea abre con `· `, `- `, `* ` o `N. `, las continuaciones
+ * se alinean debajo del TEXTO, no debajo del bullet. Es lo que hace que una lista larga se lea
+ * como una lista y no como un párrafo con un símbolo suelto adelante.
+ */
 export function softWrap(text, max) {
-  const words = String(text).split(/\s+/);
+  const crudo = String(text);
+  const sangria = crudo.match(/^\s*/)?.[0] ?? '';
+  const cuerpo = crudo.slice(sangria.length);
+
+  // Un bullet cuenta como sangría para las continuaciones, pero no para la primera línea.
+  const bullet = cuerpo.match(/^(?:[·\-*+•]\s+|\d+[.)]\s+)/)?.[0] ?? '';
+  const colgante = sangria + ' '.repeat(width(bullet));
+
+  // Sin espacio útil no hay nada que calcular: devolver el texto entero es mejor que entrar en un
+  // bucle partiendo por caracteres. Un `max` demasiado chico es un error del llamador.
+  const util = max - width(sangria);
+  if (util <= 1) return [crudo];
+
+  const words = cuerpo.split(/\s+/).filter(Boolean);
   const out = [];
   let line = '';
+  let prefijo = sangria;
+
   for (const word of words) {
+    const disponible = max - width(prefijo);
     if (!line) {
       line = word;
-    } else if (width(line) + 1 + width(word) <= max) {
+    } else if (width(line) + 1 + width(word) <= disponible) {
       line += ` ${word}`;
     } else {
-      out.push(line);
+      out.push(prefijo + line);
+      prefijo = colgante;
       line = word;
     }
   }
-  if (line) out.push(line);
-  return out.length ? out : [''];
+  if (line) out.push(prefijo + line);
+  return out.length ? out : [crudo];
 }
 
 /**
