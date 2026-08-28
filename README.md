@@ -110,12 +110,12 @@ Detalles que Windows obliga a manejar y están cubiertos por tests:
 │   └── backups/
 ├── skills/clickup-task-flow/  ← nuevo
 ├── commands/                  ← nuevo: tarea.md, clickup-setup.md, clickup-config.md
-└── settings.json              ← MODIFICADO: se agregan 3 hooks y permisos de lectura
+└── settings.json              ← MODIFICADO: se agregan 4 hooks y permisos de lectura
 ```
 
 **`settings.json` se modifica por unión, nunca por reemplazo.** Se hace un backup con timestamp
 antes de escribir, tus hooks y tus permisos se conservan tal cual, y reinstalar **reemplaza** las
-tres entradas propias en vez de acumularlas. Está cubierto por tests: el suite arranca con un
+entradas propias en vez de acumularlas. Está cubierto por tests: el suite arranca con un
 `settings.json` realista —con hooks de otras herramientas y listas de `allow`/`deny`— y verifica
 que después de instalar, reinstalar y desinstalar **no falte nada de lo que había**.
 
@@ -138,7 +138,7 @@ directorio `test/`, así que agregar uno no requiere acordarse de anotarlo en ni
 | `adversarial-identidad` | Matcheo de miembros y tokens: quién recibe el trabajo |
 | `adversarial-protocolo` | Render con configuración hostil, cajas y wrapping |
 | `adversarial-migracion` | Escaneo del protocolo viejo e importación del equipo |
-| `adversarial-cli` | Entradas hostiles a los tres hooks, parseo de argumentos, `project forget` |
+| `adversarial-cli` | Entradas hostiles a los hooks, parseo de argumentos, `project forget` |
 | `concurrencia` | 20 procesos escribiendo el config a la vez; encontró un lost update real |
 | `hostilidad` | Permisos, symlinks, nombres con comillas, payloads de 5 MB, cwd borrado |
 | `esquema` | 90 combinaciones de tipo equivocado + 192 combinaciones del protocolo |
@@ -176,15 +176,84 @@ en silencio, y el síntoma sería "el protocolo no hizo nada".
 
 ## Cómo funciona
 
-Tres hooks que ejecuta **el harness de Claude Code, no el modelo**. Esa distinción es el punto:
-una instrucción se puede olvidar o diluir cuando el contexto se comprime en una sesión larga; un
-hook no.
+### Lo primero, porque define qué es esto
+
+**El CLI no puede escribir en ClickUp, y nunca va a poder.** El conector que expone Claude Code es
+una integración OAuth de claude.ai: no deja token en disco, no aparece en `mcpServers`, y ningún
+proceso fuera de una sesión de Claude tiene por dónde llamarlo. Crear la tarea, comentarla y
+cerrarla lo hace **el modelo**, vía MCP.
+
+Eso deja una asimetría incómoda, y vale nombrarla antes que esconderla: los hooks son
+deterministas pero no pueden escribir en el tablero; el modelo puede escribir pero es
+no-determinista por definición.
+
+Lo que cierra el hueco no es darle credenciales al CLI. Es dejar de depender de la **palabra** del
+modelo. El harness le entrega al hook el resultado real de cada llamada MCP, así que el registro
+local pasa de ser *lo que el modelo dice que hizo* a ser *lo que el harness vio que pasó*. Y con
+esa evidencia en la mano, el hook `Stop` puede negarse a cerrar el turno.
+
+> El modelo sigue siendo el único que puede escribir en ClickUp.
+> Deja de ser el único que sabe si escribió.
+
+### Los cuatro hooks
+
+Los ejecuta **el harness de Claude Code, no el modelo**. Esa distinción es el punto: una
+instrucción se puede olvidar o diluir cuando el contexto se comprime en una sesión larga; un hook
+no.
 
 | Hook | Cuándo | Qué hace |
 | --- | --- | --- |
-| `SessionStart` | Al abrir sesión | Anuncia a qué espacio de ClickUp está atado el proyecto, o que no tiene ninguno |
-| `UserPromptSubmit` | En cada turno | Recuerda si hay tarea reclamada y qué falta hacer |
-| `PreToolUse` | Antes de cada `Edit`/`Write` | **Cancela la escritura** si no hay tarea reclamada ni exención vigente |
+| `SessionStart` | Al abrir sesión y **al compactar** | Anuncia a qué lista de ClickUp está atado el proyecto, o que no tiene ninguna |
+| `PreToolUse` | Antes de `Edit`/`Write`/`MultiEdit`/`NotebookEdit`/**`Bash`** | **Cancela la escritura** si no hay tarea reclamada ni exención. En un proyecto nuevo, **pregunta una vez** si entra al flujo |
+| `PostToolUse` | Después de cada escritura MCP a ClickUp | Registra la mutación **real**, leyendo el resultado de la herramienta |
+| `Stop` | Al querer terminar el turno | **No deja cerrar** con una tarea reclamada y sin ninguna mutación registrada |
+
+`Bash` está en el matcher del candado a propósito: sin él, `cat > archivo <<EOF`, `sed -i`, `tee`,
+`git apply` y `python -c` pasaban de largo — y el modo `bypassPermissions` de Claude Code
+**recomienda** justamente esas formas por encima de `Edit`/`Write`. Un candado evadible que se
+presenta como garantía es peor que no tener candado.
+
+### La obligación se arma sola, y por qué eso importa
+
+Toda la verificación depende de una sola cosa frágil: que el matcher del `PostToolUse` coincida
+con los nombres de las herramientas del conector de ClickUp. En esta máquina son
+`mcp__claude_ai_ClickUp__clickup_*` y el matcher es exacto. **En otra instalación puede no serlo.**
+
+Y si no coincide, la cadena se desmorona hacia el lado malo: el hook nunca corre, ningún claim se
+verifica, `Stop` bloquea todos los turnos, `sync_failed` se acumula y el candado no abre más. La
+herramienta te acusaría de no sincronizar algo que sincronizaste perfecto. Un problema de plomería
+te traba la máquina — peor que el problema que la obligación viene a resolver, y en contra de la
+regla que gobierna todo el resto: **fallar abierto cuando algo no está bien configurado.**
+
+Así que se distinguen dos cosas que sin esto se ven iguales:
+
+| Lo que se observa | Lectura | Qué hace |
+| --- | --- | --- |
+| Esta **tarea** no tiene evidencia | El modelo probablemente no cerró | Exige: `Stop` bloquea, `release` se niega |
+| Esta **instalación** nunca registró ninguna | La plomería está rota | No exige nada, avisa fuerte |
+
+La obligación **se arma sola** recién cuando el `PostToolUse` demostró correr al menos una vez. Y
+mientras esté desarmada, `doctor` lo dice en una línea:
+
+```
+evidencia MCP   NUNCA registró nada ← la obligación de cerrar está DESARMADA
+```
+
+Se pierde algo de dureza. Se gana no poder trabar una máquina por un nombre de herramienta que
+cambió.
+
+**El costo, medido y dicho:** cada invocación del guard son ~136 ms, de los cuales **94 son el
+arranque de node** — irreducible mientras el hook sea un proceso. Se intentó bajarlo cargando
+módulos bajo demanda; la ganancia quedó por debajo del ruido entre corridas, así que el cambio se
+revirtió en vez de dejar indirección sin beneficio demostrado. Agregar `Bash` al matcher sube la
+cantidad de invocaciones por turno, y es un costo real que se paga a cambio de que el candado deje
+de ser evadible con la herramienta que el propio harness recomienda.
+
+**No hay hook por prompt.** Lo hubo, y se fue: spawneaba `node` en cada turno de cada proyecto de
+la máquina (0,14 s medidos en repos donde el resultado estaba garantizado que era "no hacer nada")
+y quemaba ~70 palabras de contexto por turno repitiendo algo ya leído. Su única función real —que
+una sesión larga no se olvide tras compactar— la cubre `SessionStart`, que también dispara en
+`compact`.
 
 ### El candado falla ABIERTO cuando no está configurado
 
@@ -194,19 +263,71 @@ convertiría una comodidad en algo que rompe trabajo ajeno.
 
 Así que el `PreToolUse` deja pasar, sin decir nada, cuando:
 
-- el proyecto **no está configurado**;
 - el proyecto está **excluido** a propósito;
+- la decisión está **pospuesta** (ver más abajo);
 - el candado está apagado en la configuración;
 - hay una **tarea reclamada**;
 - hay una **exención vigente**;
-- lo que se edita es `CLAUDE.md` o algo dentro de `.claude/` (configurar el tooling no es el
-  trabajo compartido que el candado protege);
+- lo que se toca **no escribe nada** (un `ls`, un `rg`, un `git status`);
+- lo que se edita es `CLAUDE.md`, `.gitignore`, algo dentro de `.claude/`, o **cualquier archivo
+  fuera del proyecto** — configurar el tooling no es el trabajo compartido que el candado protege;
 - **la configuración no se puede leer.** Un JSON roto desactiva el protocolo, no la máquina.
 
-Solo bloquea en el caso restante: proyecto configurado, candado activo, y ni tarea ni exención.
+Una precisión que costó un bug: la exención de `.claude/` se evalúa sobre la ruta **relativa al
+proyecto y anclada**, con `worktrees/` excluido explícitamente. Antes era un `includes('/.claude/')`
+sobre la ruta absoluta — y como Claude Code crea sus worktrees en `<repo>/.claude/worktrees/<n>/`,
+trabajar en un worktree eximía el **repo entero**: cada archivo de código, no solo la config.
 
-**Límite conocido, dicho sin adornos:** cubre las herramientas de edición. Una escritura hecha por
-`Bash` (heredoc, `sed`, `tee`) **no pasa por el hook**. Es un candado fuerte, no hermético.
+## Un proyecto nuevo: la herramienta pregunta sola
+
+El registro de proyectos es **global** y vive en `~/.claude/clickup-flow/config.json`. No se
+instala nada dentro de tus repos. Cada carpeta está en uno de cuatro estados:
+
+| Estado | Qué significa | El protocolo |
+| --- | --- | --- |
+| `tasks` / `umbrella` | Registrado, con lista destino | **Se aplica** |
+| `excluded` | El usuario dijo que no, por escrito | No, y no se vuelve a preguntar |
+| `pending` | Lo vimos, nadie contestó todavía | No todavía — hay una pregunta abierta |
+| *(sin entrada)* | Nunca se escribió código acá | No |
+
+El cuarto estado, `pending`, es el que faltaba, y su ausencia era el defecto de fondo del
+descubrimiento: "nunca lo vi" y "el usuario dijo que no" se comportaban **idéntico**. Los dos
+hooks preguntaban lo mismo, así que el default de la herramienta era el silencio permanente y la
+única forma de salir era que un humano tipeara `/clickup-setup`. Si el modelo no se acordaba de
+ofrecerlo, nunca pasaba nada — y eso es exactamente lo que pasaba.
+
+Ahora pregunta un hook, que no se olvida. **La primera vez que se escribe código real** en una
+carpeta desconocida, el candado se detiene una vez con tres salidas:
+
+```
+1. Sí, acá se gestionan tareas     → /clickup-setup
+2. No, este proyecto no usa ClickUp → clickup-flow project exclude --reason "..."
+3. Ahora no                         → clickup-flow project snooze
+```
+
+Tres propiedades hacen que esto sea tolerable en cada repo de la máquina y no una plaga:
+
+1. **Solo dispara ante una escritura real.** Leer, buscar y responder no la activan.
+2. **Pregunta y pospone en el mismo acto.** Si ignorás el bloqueo, el trabajo sigue: el segundo
+   intento ya no se detiene. Un candado que insiste es un candado que se desinstala.
+3. **Se apaga para toda la máquina** con
+   `clickup-flow config set --key defaults.ask_new_projects --value false`.
+
+### Descubrimiento por organización
+
+Si el repo nuevo comparte la organización del remote con otro ya configurado
+(`github.com/acme/…`), la pregunta llega con la respuesta cargada:
+
+```bash
+clickup-flow project adopt --like "/ruta/del/otro/proyecto"
+```
+
+Copia el destino y las convenciones del tablero — **no** el rol ni la contraparte, que son
+propiedades de este proyecto en la cadena de entrega y heredarlas crearía entregas hacia quien no
+corresponde.
+
+El resolver de un proyecto sigue siendo: ruta exacta → **misma carpeta por `realpath`** (dos
+symlinks al mismo directorio dejan de ser dos proyectos) → carpeta ancestro → mismo git remote.
 
 ### Un solo protocolo, resuelto por proyecto
 
@@ -811,7 +932,7 @@ clickup-flow doctor      # primera línea: version
 Quita, **usando el manifiesto** (así que también se lleva archivos de versiones anteriores con
 otros nombres):
 
-- los tres hooks de `settings.json`, y solo esos;
+- los hooks de `settings.json`, y solo esos;
 - los permisos de lectura de ClickUp que agregó, y solo esos;
 - la skill, los tres comandos y los wrappers;
 - el motor.

@@ -249,15 +249,38 @@ diga **dónde quedó**. Una tarea colgada en `in progress` bloquea a todos los d
 **`Sin verificar:` no es opcional** en el comentario de cierre. Es normal que algo quede sin
 probar; lo que no es aceptable es que no esté dicho.
 
-## El candado es real
+## Esto no depende de que vos te acuerdes
 
-Un hook `PreToolUse` que ejecuta **el harness, no el modelo**, cancela toda escritura si el
-proyecto está configurado y no hay ni tarea reclamada ni exención vigente. No es una sugerencia
-bien redactada: la llamada no ocurre.
+Tres hooks los ejecuta **el harness, no el modelo**. Ninguno se puede olvidar, diluir en una
+compactación, ni omitir por conveniencia.
 
-**Límite conocido, dicho sin adornos:** cubre las herramientas de edición. Una escritura hecha por
-`Bash` (heredoc, `sed`, `tee`) **no pasa por el hook**. Es un candado fuerte, no hermético — y
-saltearlo a propósito por Bash es violar el protocolo, no un resquicio legítimo.
+**1. `PreToolUse` — no se escribe sin tarea.**
+Cancela toda escritura si el proyecto está registrado y no hay ni tarea reclamada ni exención
+vigente. Cubre `Edit`, `Write`, `MultiEdit`, `NotebookEdit` **y `Bash`**: un heredoc, un `sed -i`,
+un `tee`, un `git apply` o un `python -c` que escriba archivos se bloquean igual que un `Write`.
+Y en un proyecto que la herramienta nunca vio, ese mismo hook **pregunta una vez** si acá se
+gestionan tareas — no espera a que alguien se acuerde de ofrecer `/clickup-setup`.
+
+**2. `PostToolUse` — la evidencia no la ponés vos.**
+Cada llamada de escritura al MCP de ClickUp queda registrada leyendo el **resultado real** de la
+herramienta. Un claim no está verificado porque lo digas: está verificado porque el harness vio
+la mutación. Por eso `release` rechaza soltar una tarea sobre la que no hay ninguna.
+
+**3. `Stop` — no se cierra el turno dejando el tablero desactualizado.**
+Si hay una tarea reclamada y ninguna mutación registrada para ella, el turno **no puede
+terminar**. Después de dos avisos suelta —un hook que bloquea para siempre cuelga la sesión— pero
+deja `sync_failed` escrito, y entonces el candado de escritura no vuelve a abrirse en ese proyecto
+hasta reconciliar. El fallo no se pierde: se traslada.
+
+Los hooks 2 y 3 **se arman solos**: mientras el `PostToolUse` no haya corrido ni una vez en esta
+instalación, no se exige nada y se falla abierto. La razón es simple — si el matcher no coincide
+con el nombre de las herramientas de tu conector, exigir evidencia trabaría el proyecto acusándote
+de algo que hiciste bien. `clickup-flow doctor` dice si está armada o no.
+
+**Lo que sigue dependiendo de vos, dicho sin adornos:** el CLI **no puede escribir en ClickUp**.
+El conector es OAuth de claude.ai, no hay token en disco, y ningún proceso fuera de una sesión de
+Claude puede llamarlo. Crear la tarea, comentarla y cerrarla lo hacés vos por MCP. Lo que cambió
+es que ya no sos la única fuente sobre si lo hiciste.
 
 ## Qué NO va a ClickUp
 

@@ -1,7 +1,7 @@
 {
   "name": "claude-clickup-tasks",
   "version": "1.0.0",
-  "description": "Protocolo global de gestión de tareas de ClickUp para Claude Code: valida colisiones antes de escribir código y crea tareas de forma autónoma.",
+  "description": "Protocolo global de gestión de tareas de ClickUp para Claude Code: valida colisiones antes de escribir código, y usa hooks del harness para exigir —y verificar contra el resultado real del MCP— que el trabajo quede reflejado en el tablero.",
   "type": "module",
   "private": true,
   "bin": {
