@@ -1,5 +1,5 @@
 ---
-description: Configura (o reconfigura) este proyecto para que genere tareas en ClickUp — elige espacio, lista y modo de trabajo, o lo excluye del flujo
+description: Configura (o reconfigura) este proyecto para que genere tareas en ClickUp — elige la lista destino y el modo de trabajo, o lo excluye del flujo
 ---
 
 Argumento recibido: `$ARGUMENTS`
@@ -62,46 +62,98 @@ eliminar.
 
 ---
 
-## Paso 2 — Elegí espacio y lista
+## Paso 2 — Elegí la lista destino
 
 ```
 ToolSearch(query: "select:clickup_get_workspace_hierarchy,clickup_get_list,clickup_get_folder")
 ```
 
+La jerarquía de ClickUp tiene un nivel opcional y uno obligatorio:
+
+```
+Workspace
+└── Espacio
+    ├── Carpeta        ← OPCIONAL
+    │   └── Lista
+    └── Lista          ← "folderless": cuelga directo del espacio
+        └── Tarea
+```
+
+**La carpeta puede no existir; la lista siempre existe.** Una tarea vive en una lista, nunca en un
+espacio ni en una carpeta. Por eso lo único que hay que preguntar es **la lista**: el espacio y la
+carpeta son el camino, no el destino.
+
+### 2.1 — Traé la jerarquía COMPLETA
+
 ```
 clickup_get_workspace_hierarchy
 ```
 
-Presentale la jerarquía **de forma legible y numerada** — espacios, y dentro de cada uno las
-carpetas y listas — y que elija **la lista donde se crean las tareas de este proyecto**.
+**Paginá antes de mostrar nada.** La respuesta trae `has_more` y `next_cursor`: mientras `has_more`
+sea `true`, volvé a llamar con ese cursor y acumulá. Una sola llamada no garantiza el árbol entero,
+y armar el menú sobre un árbol a medias es peor que fallar — el usuario elige entre lo que le
+mostraste sin enterarse de que faltaba la otra mitad.
 
-Guías para presentarla bien:
+Anotá también `hierarchy.root.id`: **ese es el `workspace_id`**. Es el único lugar de donde sale.
 
-- Si el nombre del proyecto o del repo coincide con un espacio o lista, **señalalo como candidato**
-  pero **no lo elijas solo**.
-- Si hay muchísimos espacios, mostrá primero los que tienen coincidencia y ofrecé ver el resto.
-- La lista es **obligatoria**. Un espacio sin lista no alcanza: las tareas se crean en listas.
+### 2.2 — Aplaná el árbol a rutas y numerá SOLO las listas
+
+Recorré `hierarchy.root.children` y emití **una opción numerada por cada nodo `type: "list"`**. Los
+espacios y las carpetas **nunca llevan número**: aparecen solo como contexto dentro de la etiqueta.
+Si lo único elegible es una lista, el usuario no puede elegir mal.
+
+Formato: `Espacio › Carpeta › Lista`, y `Espacio › Lista` cuando la lista no está en ninguna
+carpeta. No rellenes el hueco con `(sin carpeta)`: eso nombra una ausencia en vez de describir un
+lugar.
+
+Presentalo así, y **con la línea de aclaración tal cual** — es lo que evita que el usuario crea que
+está eligiendo un espacio:
+
+> **¿En qué lista se crean las tareas de este proyecto?**
+> Las tareas se crean en la **última parte** de la ruta.
+>
+> 1. Acme › Facturación › List
+> 2. Acme › Soporte › List
+> 3. Acme › Plataforma › Gateway
+> 4. Acme › Backlog
+
+**Por qué una sola pregunta y no una cascada** (espacio → carpeta → lista): la jerarquía ya vino
+entera en una llamada, con todos los ids adentro. Preguntar nivel por nivel es hacerle caminar al
+humano un árbol que vos ya tenés completo. Y como la mayoría de las carpetas tiene una sola lista,
+serían dos preguntas para llegar a un lugar que ya era único.
+
+Reglas para que el menú sea usable:
+
+- **Un nombre de lista repetido no es evidencia de nada.** ClickUp llama `List` a toda lista nueva,
+  así que es normal encontrar cinco listas con el mismo nombre en el mismo espacio. La carpeta es
+  lo único que las distingue — por eso va **siempre** en la etiqueta cuando existe.
+- Si alguna ruta coincide con el nombre del repo o del proyecto, **marcala como candidata** con una
+  nota al costado. **No la elijas por tu cuenta.**
+- **Más de ~25 rutas:** no vuelques todo. Mostrá primero las que coinciden con el nombre del repo,
+  decí cuántas hay en total, y ofrecé filtrar por texto o ver el resto. Un menú de 200 números no
+  es un menú.
+- Si el usuario contesta con un nombre en vez de un número y ese nombre es ambiguo, **volvé a
+  mostrar solo las rutas que coinciden**, numeradas. No adivines cuál quiso.
+
+De la ruta elegida salen los cuatro ids solos: `workspace_id` (el `root.id` del 2.1), `space_id` +
+nombre, `folder_id` + nombre **solo si la ruta tenía tres segmentos**, y `list_id` + nombre.
+**Ninguno de los cuatro hace falta preguntarlo.**
 
 ### Si la jerarquía vuelve vacía o sin listas
 
 Pasa de verdad: `clickup_get_workspace_hierarchy` puede devolver un espacio con `children: []`.
-**No inventes un `list_id` ni entres en un bucle de reintentos.** En orden:
+**No inventes un `list_id` ni entres en un bucle de reintentos.** Si ya paginaste (2.1) y aun así
+no quedó ninguna ruta, **decilo tal cual** —"la conexión de ClickUp no ve ninguna lista en este
+workspace"— y ofrecé las dos salidas reales:
 
-1. **Paginá.** La respuesta trae `has_more` y `next_cursor`. Si `has_more` es `true`, volvé a
-   llamar con ese cursor hasta que sea `false`. Una sola llamada no garantiza la jerarquía completa.
-2. Si ya paginaste y sigue sin listas, **decilo tal cual** — "la conexión de ClickUp no ve ninguna
-   lista en este workspace" — y ofrecé las dos salidas reales:
-   - que el usuario pegue la **URL o el id** de la lista, y verificalo con
-     `clickup_get_list` antes de guardarlo — un `list_id` que no resuelve deja el proyecto
-     configurado y roto a la vez, o
-   - crear una lista con `clickup_create_list` (o `clickup_create_list_in_folder`), **preguntando
-     primero** el nombre y dónde.
-3. Si tampoco eso se puede, **cerrá el setup sin escribir nada** y explicá que sin lista el
-   protocolo no puede operar. Una configuración a medias es peor que ninguna: el candado quedaría
-   cerrado sobre un proyecto que no puede crear tareas.
+- que el usuario pegue la **URL o el id** de la lista, y verificalo con `clickup_get_list` antes de
+  guardarlo — un `list_id` que no resuelve deja el proyecto configurado y roto a la vez, o
+- crear una lista, **preguntando primero** el nombre y dónde: `clickup_create_list` la cuelga
+  directo del espacio, `clickup_create_list_in_folder` la mete en una carpeta.
 
-Anotá el `workspace_id`, `space_id` + nombre, `folder_id` + nombre si la lista está en una carpeta,
-y `list_id` + nombre.
+Si tampoco eso se puede, **cerrá el setup sin escribir nada** y explicá que sin lista el protocolo
+no puede operar. Una configuración a medias es peor que ninguna: el candado quedaría cerrado sobre
+un proyecto que no puede crear tareas.
 
 ### Y capturá los estados REALES de la lista
 
@@ -235,6 +287,10 @@ Después, una pregunta más — con default, para que se pueda contestar con Ent
   --status-done "<nombre real>" \
   --available-statuses "<todos|los|estados|de|la|lista>"
 ```
+
+Los corchetes marcan lo opcional: **`--folder-id` / `--folder-name` van solo si la ruta que eligió
+el usuario tenía tres segmentos.** Una lista folderless no tiene carpeta, y pasar la del vecino
+haría que `status` describa un lugar que no existe.
 
 `--available-statuses` valida los otros cinco: si mapeaste un estado que no existe en la lista, el
 comando **falla ahí** en vez de dejarte descubrirlo en el primer update que no anda.
