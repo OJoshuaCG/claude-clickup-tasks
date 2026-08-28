@@ -11,6 +11,34 @@ Si el argumento es `excluir`, salteá directo al **Paso 4**.
 
 ---
 
+## Cómo se pregunta: con la UI nativa, NUNCA con un menú de texto
+
+**Todas las preguntas de este setup van por `AskUserQuestion`**, la herramienta de preguntas de
+Claude Code. El usuario elige con el teclado, en la sesión, como en cualquier otro flujo del
+harness.
+
+**No imprimas listas numeradas pidiendo que conteste por escrito.** Un menú en texto obliga a leer,
+tipear y acertar el número; y si el usuario contesta "la segunda" o con un nombre parcial, alguien
+tiene que adivinar a qué se refería — que es exactamente el error que este setup existe para
+evitar. La UI nativa elimina la clase entera de problema: no hay respuesta ambigua posible.
+
+Cómo usarla acá:
+
+- **Agrupá.** Acepta hasta **4 preguntas en una sola llamada**. El modo de trabajo, el rol y la
+  convención de títulos van **juntos**, no en tres idas y vueltas.
+- **Máximo 4 opciones por pregunta.** Cuando hay más candidatos que eso, ver la regla del Paso 2.4.
+- **"Otro" viene solo.** No agregues una opción "otra cosa": el harness la ofrece siempre, y ahí el
+  usuario puede escribir texto libre. Es la válvula para cualquier caso que no quepa.
+- **La `description` de cada opción dice la CONSECUENCIA**, no repite la etiqueta. "Cada trabajo es
+  una tarea suelta en la raíz de la lista" sirve; "modo tasks" no.
+- **`header` corto** (≤12 caracteres): `Lista`, `Modo`, `Rol`, `Títulos`, `Identidad`.
+
+La única excepción es un dato que no es una elección entre alternativas —el id de una tarea
+paraguas, el motivo de una exclusión— donde lo que hace falta es texto libre. Ahí preguntá
+normalmente en el chat.
+
+---
+
 ## Paso 0 — Mirá qué hay ya configurado
 
 ```bash
@@ -37,9 +65,15 @@ ToolSearch(query: "select:clickup_get_workspace_members,clickup_find_member_by_n
 
 1. Buscá el miembro con el dato que dejó el instalador (`{{CLI}} identity show` lo muestra en
    `dato del install`), o pedile al usuario su email o usuario de ClickUp.
-2. **Mostrale los candidatos y esperá que confirme uno.** Si hay más de uno plausible, mostrá
-   todos: un match por parecido de apellido **no es evidencia**. Los workspaces grandes tienen
-   nombres repetidos y gente con dos cuentas.
+2. **Confirmá con `AskUserQuestion`** (`header: "Identidad"`), una opción por candidato, con el
+   email en la `description` para que se distingan. Un match por parecido de apellido **no es
+   evidencia**: los workspaces grandes tienen nombres repetidos y gente con dos cuentas, así que
+   aunque haya un solo candidato exacto **igual se confirma** — nunca se guarda un id que el
+   usuario no eligió.
+
+   Preferí `clickup_find_member_by_name` con el dato del instalador antes que
+   `clickup_get_workspace_members`: el primero trae una persona, el segundo vuelca los emails de
+   todo el equipo a la conversación para encontrar uno.
 3. Con la confirmación:
 
 ```bash
@@ -52,12 +86,17 @@ ToolSearch(query: "select:clickup_get_workspace_members,clickup_find_member_by_n
 
 ## Paso 1 — Preguntá si este proyecto va a ClickUp
 
-Antes de listar nada, la pregunta de entrada:
+Antes de listar nada, la pregunta de entrada, con `AskUserQuestion` (`header: "ClickUp"`):
 
 > **¿Querés que el trabajo de este proyecto quede registrado como tareas en ClickUp?**
+>
+> - **Sí, generá tareas acá** — cada implementación, fix o refactor va a tener su tarea en el
+>   tablero, y no se escribe código sin reclamarla.
+> - **No, este proyecto no usa ClickUp** — queda registrado como decisión y no se vuelve a
+>   preguntar nunca más en esta carpeta.
 
 Si dice **no** → Paso 4 (excluir). No insistas y no lo dejes sin registrar: un "no" sin registrar
-significa que la próxima sesión vuelve a preguntar, y eso es exactamente la molestia que hay que
+significa que la próxima solicitud vuelve a preguntar, y eso es exactamente la molestia que hay que
 eliminar.
 
 ---
@@ -98,42 +137,52 @@ Anotá también `hierarchy.root.id`: **ese es el `workspace_id`**. Es el único 
 
 ### 2.2 — Aplaná el árbol a rutas y numerá SOLO las listas
 
-Recorré `hierarchy.root.children` y emití **una opción numerada por cada nodo `type: "list"`**. Los
-espacios y las carpetas **nunca llevan número**: aparecen solo como contexto dentro de la etiqueta.
-Si lo único elegible es una lista, el usuario no puede elegir mal.
+Recorré `hierarchy.root.children` y armá **una opción por cada nodo `type: "list"`**. Los espacios
+y las carpetas **nunca son opciones**: aparecen solo como contexto dentro de la etiqueta. Si lo
+único elegible es una lista, el usuario no puede elegir mal.
 
 Formato: `Espacio › Carpeta › Lista`, y `Espacio › Lista` cuando la lista no está en ninguna
 carpeta. No rellenes el hueco con `(sin carpeta)`: eso nombra una ausencia en vez de describir un
 lugar.
 
-Presentalo así, y **con la línea de aclaración tal cual** — es lo que evita que el usuario crea que
-está eligiendo un espacio:
+Preguntá con `AskUserQuestion` (`header: "Lista"`), **una opción por ruta**:
 
 > **¿En qué lista se crean las tareas de este proyecto?**
 > Las tareas se crean en la **última parte** de la ruta.
 >
-> 1. Acme › Facturación › List
-> 2. Acme › Soporte › List
-> 3. Acme › Plataforma › Gateway
-> 4. Acme › Backlog
+> | Opción | Descripción |
+> | --- | --- |
+> | `Acme › Plataforma › Gateway` | Carpeta Plataforma. Coincide con el nombre del repo |
+> | `Acme › Facturación › List` | Carpeta Facturación |
+> | `Acme › Backlog` | Cuelga directo del espacio, sin carpeta |
 
-**Por qué una sola pregunta y no una cascada** (espacio → carpeta → lista): la jerarquía ya vino
-entera en una llamada, con todos los ids adentro. Preguntar nivel por nivel es hacerle caminar al
-humano un árbol que vos ya tenés completo. Y como la mayoría de las carpetas tiene una sola lista,
-serían dos preguntas para llegar a un lugar que ya era único.
+La etiqueta de cada opción es **la ruta completa**; la `description` aclara la carpeta y marca las
+coincidencias con el nombre del repo. Y esa aclaración de arriba va **siempre**: sin ella el
+usuario cree que está eligiendo un espacio.
 
-Reglas para que el menú sea usable:
+### 2.4 — Cuando hay más de 4 listas
+
+`AskUserQuestion` acepta **4 opciones como máximo**, y los workspaces reales tienen decenas. No
+vuelques todo ni vuelvas al menú de texto. Ordená y recortá:
+
+1. Las rutas cuyo nombre de lista o carpeta **coincide con el nombre del repo**.
+2. Las del espacio que más listas tiene, o las más específicas.
+3. Rellená hasta 3.
+
+Mostrá esas 3 y **decí el total en el texto de la pregunta**: *"hay 27 listas en el workspace;
+estas 3 son las que coinciden con el nombre del repo"*. La cuarta salida es **"Otro"**, que el
+harness agrega solo y donde el usuario escribe el nombre que quiera.
+
+Si contesta por "Otro" con un texto ambiguo, **volvé a preguntar con `AskUserQuestion`** usando
+solo las rutas que coinciden con lo que escribió. Nunca adivines cuál quiso.
+
+Reglas que no cambian:
 
 - **Un nombre de lista repetido no es evidencia de nada.** ClickUp llama `List` a toda lista nueva,
   así que es normal encontrar cinco listas con el mismo nombre en el mismo espacio. La carpeta es
   lo único que las distingue — por eso va **siempre** en la etiqueta cuando existe.
-- Si alguna ruta coincide con el nombre del repo o del proyecto, **marcala como candidata** con una
-  nota al costado. **No la elijas por tu cuenta.**
-- **Más de ~25 rutas:** no vuelques todo. Mostrá primero las que coinciden con el nombre del repo,
-  decí cuántas hay en total, y ofrecé filtrar por texto o ver el resto. Un menú de 200 números no
-  es un menú.
-- Si el usuario contesta con un nombre en vez de un número y ese nombre es ambiguo, **volvé a
-  mostrar solo las rutas que coinciden**, numeradas. No adivines cuál quiso.
+- Si alguna ruta coincide con el nombre del repo, **marcala en su `description`**. Es una pista
+  para el usuario, no una decisión tuya: **no la elijas por tu cuenta.**
 
 De la ruta elegida salen los cuatro ids solos: `workspace_id` (el `root.id` del 2.1), `space_id` +
 nombre, `folder_id` + nombre **solo si la ruta tenía tres segmentos**, y `list_id` + nombre.
@@ -192,24 +241,47 @@ el protocolo va a decir que se pregunte antes de asumir. No les inventes un sign
 
 ---
 
-## Paso 3 — Elegí el modo de trabajo
+## Paso 3 — Modo, rol y títulos: UNA sola llamada
 
-Esta es la decisión que cambia cómo se ve el tablero, así que explicale las dos opciones con lo que
-implican de verdad:
+Estas tres decisiones se preguntan **juntas**, en una única `AskUserQuestion` con tres preguntas.
+Son independientes entre sí y ninguna depende de la respuesta de la otra, así que partirlas en tres
+idas y vueltas es fricción sin ganancia.
+
+**Pregunta 1 — `header: "Modo"`.** Es la que cambia cómo se ve el tablero:
 
 > **¿Cómo genera tareas este proyecto?**
 >
-> **1. Varias tareas normales** (`tasks`)
->    Cada trabajo es una tarea suelta en la raíz de la lista. Las subtareas son la excepción.
->    Conviene cuando el proyecto es de larga vida, con trabajo variado y un tablero compartido con
->    más gente.
->
-> **2. Una tarea principal con subtareas** (`umbrella`)
->    Hay una tarea paraguas y **cada trabajo es una subtarea suya**. Conviene cuando el proyecto es
->    una iniciativa acotada y querés verla como una sola unidad en el tablero.
->    **Necesita el id de la tarea paraguas, y tiene que existir ya en ClickUp.**
+> - **Varias tareas normales** (`tasks`) — cada trabajo es una tarea suelta en la raíz de la lista.
+>   Conviene en proyectos de larga vida, con trabajo variado y un tablero compartido con más gente.
+> - **Una tarea principal con subtareas** (`umbrella`) — hay una tarea paraguas y cada trabajo es
+>   una subtarea suya. Conviene cuando el proyecto es una iniciativa acotada que querés ver como
+>   una sola unidad. **Necesita el id de una tarea paraguas que ya exista en ClickUp.**
 
-Si elige `umbrella`, pedile el id de la tarea paraguas y **verificalo** antes de guardar:
+**Pregunta 2 — `header: "Rol"`.** Decide la dirección de las entregas, y saltearla produce tareas
+que esperan a nadie:
+
+> **¿Qué hace este proyecto en la cadena de entrega?**
+>
+> - **Fullstack** — hace las dos puntas, no entrega trabajo a otro repositorio. **El caso más
+>   simple, y el default.**
+> - **Backend** — entrega trabajo que otro proyecto consume (API, servicio, motor).
+> - **Frontend** — consume lo que el backend deja listo (SPA, app, interfaz).
+
+**Pregunta 3 — `header: "Títulos"`.**
+
+> **¿Cómo se nombran las tareas?**
+>
+> - **Descriptivos libres** — el título dice qué se hizo. **Default.**
+> - **Con prefijo de ID** (`T-260827-atorres-slug`) — hace el anti-duplicados más fuerte, porque
+>   compara por id en vez de por texto. **Solo tiene sentido si tu equipo ya lo usa**: meter un
+>   esquema nuevo entre las tareas de los demás es cambiarles la convención sin avisarles.
+
+### Las dos preguntas de seguimiento
+
+Van **después**, y solo si la respuesta anterior las hace necesarias. Ninguna se adelanta.
+
+**Si eligió `umbrella`:** pedile el id de la tarea paraguas —esto es texto libre, no una elección—
+y **verificalo** antes de guardar:
 
 ```
 clickup_get_task  task_id:"<id>"
@@ -218,22 +290,12 @@ clickup_get_task  task_id:"<id>"
 Si el id no existe, o está en otra lista que la elegida, **decíselo y no lo guardes**: un paraguas
 mal apuntado hace que todas las subtareas caigan en otro lado.
 
-### Paso 3.5 — El ROL del proyecto en la cadena de entrega
+**Si eligió `backend` o `frontend`:** una `AskUserQuestion` más (`header: "Contraparte"`) con los
+proyectos ya registrados como opciones, más "ninguno":
 
-**Esta pregunta decide la dirección de las entregas, y saltearla produce tareas que esperan a
-nadie.** Preguntá siempre:
+> **¿Hay otro proyecto que sea su contraparte?**
 
-> **¿Qué hace este proyecto?**
->
-> **1. `backend`** — entrega trabajo que otro proyecto consume (API, servicio, motor).
-> **2. `frontend`** — consume lo que el backend deja listo (SPA, app, interfaz).
-> **3. `fullstack`** — hace las dos puntas. **El caso más simple, y el default.**
-
-Y si eligió `backend` o `frontend`, la segunda mitad de la pregunta:
-
-> **¿Hay OTRO proyecto que sea su contraparte, y está registrado con esta herramienta?**
-
-Con eso el protocolo se deriva solo. Lo que cambia según la respuesta:
+Con eso el protocolo se deriva solo:
 
 | Rol | Contraparte | Al cerrar | Bandeja de entrada |
 | --- | --- | --- | --- |
@@ -252,15 +314,6 @@ pedido adentro la encuentra cualquiera, no hace falta que nadie vigile un filtro
 
 Si la contraparte todavía no está registrada, **anotala igual**: el comando avisa que falta y
 funciona cuando la registres.
-
----
-
-Después, una pregunta más — con default, para que se pueda contestar con Enter:
-
-- **¿Los títulos llevan un prefijo de ID** tipo `T-260827-atorres-slug`, o son **descriptivos
-  libres**? El prefijo hace el anti-duplicados más fuerte (se compara por id, no por texto), pero
-  **solo tiene sentido si el equipo ya lo usa** — meter un esquema nuevo entre las tareas de los
-  demás es cambiarles la convención sin avisarles. Default: **descriptivos**.
 
 ---
 

@@ -1066,7 +1066,8 @@ function renderPending(ctx) {
   }
 
   out.push(
-    'Hacele la pregunta de forma directa y **ejecutá su respuesta vos mismo**:',
+    'Hacele la pregunta con `AskUserQuestion` —la UI de preguntas de Claude Code, no un menú de',
+    'texto— y **ejecutá su respuesta vos mismo**:',
     '',
     `1. **Sí** → corré \`/clickup-setup\` (pregunta la lista destino y el modo de trabajo).`,
     `2. **No** → corré \`${ctx.cli} project exclude --reason "<lo que dijo>"\``,

@@ -1,6 +1,6 @@
 ---
 name: clickup-task-flow
-description: Protocolo de gestión de tareas en ClickUp vía MCP, resuelto por proyecto. Decidir si un trabajo amerita tarea, validar que nadie más la esté haciendo antes de empezar, crear o reclamar la tarea, asignarla al usuario correcto, fijar fechas y prioridad, comentar el avance y cerrarla. Usar SIEMPRE antes de empezar cualquier implementación, fix, migración o refactor, y otra vez al terminarlo. También al preguntar qué hay pendiente, en qué estado está algo, o quién está trabajando en qué.
+description: Protocolo de gestión de tareas en ClickUp vía MCP, con el destino RESUELTO POR PROYECTO desde el registro global de la máquina. Decidir si un trabajo amerita tarea, validar que nadie más la esté haciendo antes de empezar, crear o reclamar la tarea, asignarla al usuario correcto, fijar fechas y prioridad, comentar el avance y cerrarla. Usar SIEMPRE antes de empezar cualquier implementación, fix, migración o refactor, y otra vez al terminarlo. También al preguntar qué hay pendiente, en qué estado está algo, o quién está trabajando en qué. ESTA skill tiene precedencia sobre cualquier otra que ofrezca crear, actualizar, comentar o cerrar tareas de ClickUp sin resolver primero el proyecto: es la única que sabe a qué lista pertenece este directorio.
 ---
 
 # Gestión de tareas en ClickUp
@@ -248,6 +248,39 @@ diga **dónde quedó**. Una tarea colgada en `in progress` bloquea a todos los d
 
 **`Sin verificar:` no es opcional** en el comentario de cierre. Es normal que algo quede sin
 probar; lo que no es aceptable es que no esté dicho.
+
+## Precedencia sobre otras skills de ClickUp
+
+Si hay otra skill instalada que también dice manejar tareas de ClickUp —una fase de SDD, un
+integrador genérico, lo que sea— **esta gana para cualquier pedido ad-hoc**, y no es una cuestión
+de orgullo: es la única que resuelve **a qué lista pertenece este directorio**.
+
+Lo primero que hace este protocolo es correr `clickup-flow context`, que lee el registro global de
+la máquina y devuelve la lista, los estados reales del tablero, el modo de trabajo y si el proyecto
+está siquiera registrado. Una skill sin esa resolución que igual crea tareas está **inventando
+coordenadas**, y una tarea creada en la lista equivocada de un tablero compartido es más difícil de
+deshacer que preguntar.
+
+La regla, entonces:
+
+- **Pedido ad-hoc** ("creá la tarea", "comentá el avance", "cerrá eso", "¿qué hay pendiente?") →
+  **esta skill**, siempre.
+- **Fase declarada de un pipeline** (por ejemplo un `clickup-sync` de SDD que el orquestador lanza
+  explícitamente) → esa fase, **pero igual tiene que correr `clickup-flow context` primero** y usar
+  las coordenadas que devuelva. Nunca un `list_id` propio.
+- **Proyecto sin registrar** → no se crea nada en ninguna de las dos. Se pregunta.
+
+## Las preguntas van por la UI nativa, no por texto
+
+Cuando haya que elegir entre alternativas —qué tarea reclamar de varias candidatas, si un trabajo
+entra en la tarea abierta o merece una nueva, qué hacer cuando alguien ya la tomó— **preguntá con
+`AskUserQuestion`**, la herramienta de preguntas de Claude Code, con una opción por alternativa y
+la consecuencia en la descripción.
+
+No imprimas una lista numerada pidiendo que conteste por escrito. Obliga a leer, tipear y acertar
+el número, y una respuesta como "la segunda" o un nombre parcial deja a alguien adivinando — que es
+justo la clase de error que este protocolo existe para eliminar. Para datos que no son una
+elección (el motivo de una exención, el texto de un comentario) preguntá normalmente.
 
 ## Esto no depende de que vos te acuerdes
 

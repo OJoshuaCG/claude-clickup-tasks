@@ -166,6 +166,50 @@ const HERRAMIENTAS_REALES = new Set([
 // Campos del config que empiezan igual que una herramienta y no lo son.
 const NO_SON_HERRAMIENTAS = new Set(['clickup_email', 'clickup_user_id', 'clickup_username', 'clickup_id']);
 
+check('las preguntas al usuario van por la UI nativa, no por un menú de texto', () => {
+  // Una versión anterior del setup imprimía listas numeradas y esperaba que el usuario contestara
+  // por escrito. Obliga a leer, tipear y acertar el número; y una respuesta como "la segunda" o un
+  // nombre parcial deja a alguien adivinando — que es justo la clase de error que este setup
+  // existe para eliminar.
+  assert(
+    /AskUserQuestion/.test(SETUP),
+    'el setup ya no manda preguntar con AskUserQuestion',
+  );
+  assert(
+    /No imprimas listas numeradas/.test(SETUP),
+    'el setup ya no prohíbe explícitamente el menú de texto',
+  );
+  assert(
+    /4 opciones|cuatro opciones/i.test(SETUP),
+    'el setup no dice qué hacer cuando hay más candidatos que opciones disponibles',
+  );
+  assert(/AskUserQuestion/.test(SKILL), 'el SKILL.md ya no manda usar la UI nativa');
+  assert(
+    /AskUserQuestion/.test(PROTO),
+    'el protocolo renderizado ya no le pide al modelo usar la UI nativa',
+  );
+
+  // El menú viejo tenía esta forma exacta: una cita con opciones numeradas dentro. Si vuelve a
+  // aparecer, alguien deshizo el cambio sin darse cuenta.
+  const menuDeTexto = /^> \s*\d+\.\s/m;
+  assert(!menuDeTexto.test(SETUP), 'volvió un menú numerado en el setup');
+});
+
+check('la skill declara su precedencia sobre otras skills de ClickUp', () => {
+  // Sin esto, cuando conviven dos skills que dicen manejar tareas de ClickUp, cuál gana es
+  // no-determinista. Y no son intercambiables: solo esta resuelve a qué lista pertenece el
+  // directorio, así que la otra estaría inventando coordenadas.
+  assert(/[Pp]recedencia/.test(SKILL), 'el SKILL.md no declara precedencia');
+  assert(
+    /precedencia/i.test(SKILL.split('---')[1] ?? ''),
+    'la precedencia no está en la description del frontmatter, que es lo que el modelo lee para elegir',
+  );
+  assert(
+    /clickup-flow context/.test(SKILL),
+    'el SKILL.md no explica que la precedencia sale de resolver el proyecto',
+  );
+});
+
 check('toda herramienta que las instrucciones nombran existe en el conector', () => {
   const nombradas = new Set(
     [...TODO_TEXTO.matchAll(/\bclickup_[a-z_]+\b/g)].map((m) => m[0]).filter((n) => !NO_SON_HERRAMIENTAS.has(n)),
