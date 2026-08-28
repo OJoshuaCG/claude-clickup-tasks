@@ -470,12 +470,12 @@ check('el rol y la contraparte se guardan y se ven en status', () => {
   // fullstack, está excluido, tiene el mismo rol o mira otra lista, no puede RECIBIR — y el
   // protocolo degrada a propósito para no parkear tareas que nadie va a levantar.
   cli(
-    ['project', 'set', '--mode', 'tasks', '--list-id', '901708300008', '--role', 'frontend',
+    ['project', 'set', '--mode', 'tasks', '--list-id', '4000000009', '--role', 'frontend',
      '--counterpart', projRol2, '--cwd', projRol],
     { cwd: projRol },
   );
   cli(
-    ['project', 'set', '--mode', 'tasks', '--list-id', '901708300008', '--role', 'backend',
+    ['project', 'set', '--mode', 'tasks', '--list-id', '4000000009', '--role', 'backend',
      '--counterpart', projRol, '--cwd', projRol2],
     { cwd: projRol2 },
   );
@@ -493,7 +493,7 @@ check('el rol y la contraparte se guardan y se ven en status', () => {
 check('un backend sin contraparte: status dice que cierra la cadena', () => {
   // `none` limpia la contraparte que puso el test anterior: omitir el flag la conservaría.
   cli(
-    ['project', 'set', '--mode', 'tasks', '--list-id', '901708300008', '--role', 'backend',
+    ['project', 'set', '--mode', 'tasks', '--list-id', '4000000009', '--role', 'backend',
      '--counterpart', 'none', '--cwd', projRol2],
     { cwd: projRol2 },
   );
