@@ -71,6 +71,55 @@ export function canonicalProjectKey(dir) {
   return p;
 }
 
+/**
+ * La MISMA clave, pero con los symlinks resueltos.
+ *
+ * `canonicalProjectKey` es una función pura de string, y eso es deliberado: se puede testear sin
+ * tocar el disco y no depende de que la ruta exista. Pero un identificador puramente textual
+ * miente en un caso concreto y frecuente: dos rutas distintas que son el MISMO directorio.
+ * `~/code/proyecto` y `/mnt/wd/code/proyecto` a través de un symlink producen dos entradas en el
+ * registro, y el usuario configura una y trabaja desde la otra.
+ *
+ * Por eso la resolución real vive acá, aparte, y `resolveProject` prueba PRIMERO la clave literal
+ * y DESPUÉS la real. Ese orden importa: es lo que hace que las entradas ya registradas —
+ * guardadas con la ruta tal cual la tipeó el usuario — sigan matcheando exactamente igual que
+ * antes. Nadie pierde su configuración por una mejora en el identificador.
+ *
+ * Devuelve `null` cuando la ruta no existe o no se puede resolver: no hay nada que agregar y
+ * fabricar una segunda clave igual a la primera solo duplicaría trabajo.
+ */
+export function realProjectKey(dir) {
+  if (!dir) return null;
+  try {
+    const real = canonicalProjectKey(fs.realpathSync.native(String(dir)));
+    return real && real !== canonicalProjectKey(dir) ? real : null;
+  } catch {
+    return null;
+  }
+}
+
+/**
+ * La ruta de un archivo RELATIVA a la raíz del proyecto, en formato POSIX.
+ *
+ * Existe por un bug concreto: la exención del candado preguntaba `p.includes('/.claude/')` sobre
+ * la ruta ABSOLUTA. Claude Code crea sus worktrees en `<repo>/.claude/worktrees/<nombre>/`, así
+ * que trabajar en un worktree eximía el proyecto ENTERO — cada archivo de código, no solo la
+ * configuración. Un `includes()` sobre un absoluto no puede distinguir "la config de la
+ * herramienta" de "todo el repo, visto desde otro lado".
+ *
+ * Devuelve `null` si el archivo cae FUERA del proyecto: eso no es una ruta relativa, es otra
+ * cosa, y el llamador tiene que poder distinguirlo en vez de recibir un `../../..`.
+ */
+export function projectRelative(filePath, projectDir) {
+  if (!filePath || !projectDir) return null;
+  const base = canonicalProjectKey(projectDir);
+  const target = canonicalProjectKey(filePath);
+  if (!base || !target) return null;
+  if (target === base) return '';
+  if (!target.startsWith(`${base}/`)) return null;
+  return target.slice(base.length + 1);
+}
+
 /** Stable, filesystem-safe filename for a project's local state. */
 export function projectStateFile(projectKey) {
   const hash = fnv1a32(canonicalProjectKey(projectKey));

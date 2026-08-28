@@ -11,16 +11,63 @@
 import fs from 'node:fs';
 import path from 'node:path';
 import { execFileSync } from 'node:child_process';
-import { configPath, toolHome, canonicalProjectKey, writeJsonAtomic } from './paths.mjs';
+import {
+  configPath,
+  toolHome,
+  canonicalProjectKey,
+  realProjectKey,
+  writeJsonAtomic,
+} from './paths.mjs';
 
 export const CONFIG_VERSION = 1;
 
-/** Modes a project can be in. `excluded` is a real, recorded answer — not the absence of one. */
+/**
+ * Modes a project can be in.
+ *
+ * `excluded` is a real, recorded answer — not the absence of one. `pending` es la distinción que
+ * FALTABA, y su ausencia era el bug de fondo del descubrimiento: un proyecto nunca visto y uno
+ * rechazado se comportaban idéntico. Los dos hooks decían lo mismo —
+ *
+ *     if (!ctx.registered || ctx.excluded) return 0;
+ *
+ * — así que el default de la herramienta era el silencio permanente, y la única forma de salir de
+ * ahí era que un humano tipeara `/clickup-setup`. La activación de un mecanismo determinista
+ * quedaba delegada a que el modelo se acordara de ofrecerlo. A veces se acordaba. A veces no.
+ *
+ * Con `pending`, "nunca lo vi" pasa a ser un estado con historia propia (`first_seen`,
+ * `snoozed_until`, `ask_count`) sobre el que un hook SÍ puede actuar. Nadie contesta por el
+ * usuario: se le pregunta, una vez, en el momento en que la respuesta importa.
+ */
 export const MODES = Object.freeze({
   TASKS: 'tasks', // several normal tasks in a list (mensajeria-style)
   UMBRELLA: 'umbrella', // one parent task, work happens in subtasks (frontend/backend-style)
   EXCLUDED: 'excluded', // the user said no. Recorded so we never ask again.
+  PENDING: 'pending', // lo vimos, todavía no preguntamos (o el usuario pospuso).
 });
+
+/**
+ * Un proyecto ACTIVO: registrado, con destino, y con el protocolo aplicándose.
+ *
+ * Existe para no volver a escribir `mode !== MODES.EXCLUDED` nunca más. Esa comparación era
+ * correcta mientras hubo tres estados; con `pending` adentro pasó a ser un bug silencioso —
+ * `doctor` habría reportado "sin list_id" como problema para cada proyecto pendiente, que es
+ * precisamente el estado en el que todavía no TIENE que haber una lista.
+ */
+export function isActive(entry) {
+  return entry?.mode === MODES.TASKS || entry?.mode === MODES.UMBRELLA;
+}
+
+/** El estado de un proyecto como una sola palabra, para que los hooks ramifiquen sobre esto. */
+export function projectStatus(entry) {
+  if (!entry) return 'unknown';
+  if (entry.mode === MODES.EXCLUDED) return 'excluded';
+  if (entry.mode === MODES.PENDING) return 'pending';
+  if (isActive(entry)) return 'active';
+  // Una entrada con un `mode` que esta versión no conoce. Tratarla como activa la metería en el
+  // protocolo sin coordenadas válidas; tratarla como pendiente vuelve a preguntar, que es la
+  // degradación segura.
+  return 'pending';
+}
 
 /**
  * El ROL de un proyecto dentro de la cadena de entrega.
@@ -190,6 +237,15 @@ export function defaultConfig() {
       // The PreToolUse lock. Only ever applies to registered, non-excluded projects.
       block_writes_without_task: true,
       exemption_hours: 8,
+      // ¿Preguntar en un proyecto que nunca vimos? Es LA palanca que el usuario pidió: un
+      // registro global que sepa qué proyectos aceptaron y cuáles no, y que pregunte por los
+      // que faltan. Se pregunta una vez, en la primera escritura, con tres salidas — adoptar,
+      // excluir, posponer. Poner esto en `false` devuelve el comportamiento anterior: silencio
+      // permanente hasta que alguien tipee `/clickup-setup`.
+      ask_new_projects: true,
+      // Cuántos días dura un "ahora no". Suficiente para no interrumpir una tarde de trabajo,
+      // corto para que un proyecto que sí importaba no quede olvidado un semestre.
+      snooze_days: 7,
     },
     // Keyed by canonical project path. `git_remote` lets the same repo be recognised in a
     // second checkout without asking again.
@@ -234,7 +290,7 @@ function fillDefaults(target, defaults) {
 export function loadConfig() {
   const file = configPath();
   if (!fs.existsSync(file)) {
-    return { config: defaultConfig(), ok: true, existed: false, error: null };
+    return { config: defaultConfig(), ok: true, existed: false, error: null, normalised: [] };
   }
   try {
     const raw = fs.readFileSync(file, 'utf8');
@@ -242,18 +298,45 @@ export function loadConfig() {
     // `isPlainObject`, no `typeof === 'object'`: un `[]` en la raíz pasaba la validación anterior
     // y después `config.projects` era `undefined` en un lugar muy lejano al archivo.
     if (!isPlainObject(parsed)) throw new Error('la raíz del config no es un objeto');
-    const config = fillDefaults(parsed, defaultConfig());
+    const { config, arreglado } = normalise(fillDefaults(parsed, defaultConfig()));
     config.version = CONFIG_VERSION;
     BASELINE.set(config, structuredClone(config));
-    return { config, ok: true, existed: true, error: null };
+    // `normalised` viaja hasta `doctor`: corregir una contradicción en silencio la arregla pero
+    // la vuelve invisible, y la queja original era justamente que el sistema NO la detectaba.
+    // Se arregla Y se dice.
+    return { config, ok: true, existed: true, error: null, normalised: arreglado };
   } catch (err) {
     return {
       config: defaultConfig(),
       ok: false,
       existed: true,
       error: err instanceof Error ? err.message : String(err),
+      normalised: [],
     };
   }
+}
+
+/**
+ * Contradicciones que se resuelven solas, en memoria.
+ *
+ * NO es una migración y no escribe nada: normaliza lo que se acaba de leer, y la corrección llega
+ * al disco cuando algo guarde por su cuenta. Eso mantiene la regla de que leer nunca tiene
+ * efectos, que es lo que permite que los hooks lean en cada llamada.
+ *
+ * Hoy solo arregla una: `confirmed: true` conviviendo con un `pending_query`. Son dos campos que
+ * se contradicen —está confirmada Y queda una consulta pendiente— y el sistema los mostraba a los
+ * dos sin notar el conflicto. `pending_query` es el dato que el instalador deja para que la
+ * primera sesión resuelva la identidad; una vez confirmada, no significa nada.
+ */
+function normalise(config) {
+  const arreglado = [];
+  if (config?.identity?.confirmed && config.identity.pending_query) {
+    arreglado.push(
+      `identity.pending_query ("${config.identity.pending_query}") convivía con confirmed:true`,
+    );
+    delete config.identity.pending_query;
+  }
+  return { config, arreglado };
 }
 
 /**
@@ -386,7 +469,7 @@ function loadConfigSinBaseline() {
   try {
     const parsed = JSON.parse(fs.readFileSync(file, 'utf8'));
     if (!isPlainObject(parsed)) throw new Error('la raíz del config no es un objeto');
-    const config = fillDefaults(parsed, defaultConfig());
+    const { config } = normalise(fillDefaults(parsed, defaultConfig()));
     config.version = CONFIG_VERSION;
     return { config, ok: true, existed: true };
   } catch {
@@ -443,25 +526,44 @@ export function normaliseRemote(url) {
  */
 export function resolveProject(config, dir) {
   const key = canonicalProjectKey(dir);
-  if (!key) return { key: '', entry: null, matchedBy: null, matchedKey: null };
+  if (!key) {
+    return { key: '', entry: null, matchedBy: null, matchedKey: null, status: 'unknown' };
+  }
 
   const projects = config.projects || {};
+  const hit = (entry, matchedBy, matchedKey) => ({
+    key,
+    entry,
+    matchedBy,
+    matchedKey,
+    status: projectStatus(entry),
+  });
 
-  if (projects[key]) return { key, entry: projects[key], matchedBy: 'path', matchedKey: key };
+  if (projects[key]) return hit(projects[key], 'path', key);
+
+  // La misma carpeta vista por otro nombre. Se prueba DESPUÉS de la clave literal para no
+  // cambiarle el comportamiento a nadie que ya esté registrado; ver `realProjectKey`.
+  const real = realProjectKey(dir);
+  if (real && projects[real]) return hit(projects[real], 'realpath', real);
 
   let bestKey = null;
   for (const candidate of Object.keys(projects)) {
-    if (key === candidate || key.startsWith(`${candidate}/`)) {
-      if (!bestKey || candidate.length > bestKey.length) bestKey = candidate;
+    for (const k of real ? [key, real] : [key]) {
+      if (k === candidate || k.startsWith(`${candidate}/`)) {
+        if (!bestKey || candidate.length > bestKey.length) bestKey = candidate;
+      }
     }
   }
-  if (bestKey) {
-    return { key, entry: projects[bestKey], matchedBy: 'ancestor', matchedKey: bestKey };
-  }
+  if (bestKey) return hit(projects[bestKey], 'ancestor', bestKey);
 
   // Only pay for a git subprocess if some project was actually recorded with a remote. On a
   // fresh install, and in every repo that is not registered, this skips the spawn entirely —
   // and "not registered" is the common case for a tool installed globally.
+  //
+  // Los `pending` SÍ entran acá, a diferencia de los excluidos: un proyecto pendiente en otra
+  // ruta con el mismo remote es el MISMO proyecto, y arrastrar su `snoozed_until` evita
+  // preguntar dos veces por lo mismo. Un excluido no se propaga: "no quiero ClickUp en ese
+  // checkout" no debería contagiarse a los demás clones.
   const withRemote = Object.entries(projects).filter(
     ([, entry]) => entry && entry.git_remote && entry.mode !== MODES.EXCLUDED,
   );
@@ -469,14 +571,69 @@ export function resolveProject(config, dir) {
     const remote = gitRemote(dir);
     if (remote) {
       for (const [candidate, entry] of withRemote) {
-        if (entry.git_remote === remote) {
-          return { key, entry, matchedBy: 'remote', matchedKey: candidate };
-        }
+        if (entry.git_remote === remote) return hit(entry, 'remote', candidate);
       }
     }
   }
 
-  return { key, entry: null, matchedBy: null, matchedKey: null };
+  return { key, entry: null, matchedBy: null, matchedKey: null, status: 'unknown' };
+}
+
+/**
+ * `host/organización` de un remote normalizado: `github.com/acme/repo` → `github.com/acme`.
+ *
+ * Es la unidad de descubrimiento. La crítica lo señaló bien: el resolver ya sabía matchear por
+ * remote, pero solo disparaba si YA existía otro proyecto con ese remote EXACTO — o sea, nunca
+ * para un repo nuevo, que es justo el caso que importa. La organización sí se repite: si los
+ * cuatro proyectos registrados viven en `github.com/acme/*`, el quinto repo de `acme` casi
+ * seguro va a la misma lista, y proponerlo con esa lista ya cargada convierte una configuración
+ * de seis preguntas en un sí o un no.
+ *
+ * Nunca AUTO-registra. Propone. La diferencia importa: crear tareas en el espacio equivocado de
+ * un tablero compartido es más difícil de deshacer que preguntar.
+ */
+export function remoteOrg(remote) {
+  if (!remote) return null;
+  const parts = String(remote).split('/').filter(Boolean);
+  return parts.length >= 2 ? `${parts[0]}/${parts[1]}` : null;
+}
+
+/**
+ * Proyectos activos que comparten organización con `dir`, del más reciente al más viejo.
+ *
+ * El primero es el que se ofrece como plantilla. Se ordena por `updated_at` porque el destino
+ * que el usuario tocó último es el que mejor representa dónde está trabajando hoy.
+ */
+export function suggestFromOrg(config, dir, remote = undefined) {
+  const mine = remote === undefined ? gitRemote(dir) : remote;
+  const org = remoteOrg(mine);
+  if (!org) return [];
+  return Object.entries(config.projects || {})
+    .filter(([, e]) => isActive(e) && e.list_id && remoteOrg(e.git_remote) === org)
+    .sort(([, a], [, b]) => String(b.updated_at ?? '').localeCompare(String(a.updated_at ?? '')))
+    .map(([key, entry]) => ({ key, entry, org }));
+}
+
+/** ¿La exclusión/postergación de este proyecto sigue vigente? */
+export function snoozeActive(entry) {
+  const until = Date.parse(entry?.snoozed_until ?? '');
+  return Number.isFinite(until) && until > Date.now();
+}
+
+/**
+ * Deja constancia de que vimos este directorio, sin decidir nada por el usuario.
+ *
+ * Escribir la entrada `pending` es lo que convierte "no sé nada de esta carpeta" en un hecho
+ * con fecha, y sin ese hecho no hay forma de preguntar UNA sola vez: sin `ask_count` la única
+ * alternativa es preguntar siempre o no preguntar nunca, que es exactamente el dilema del que
+ * venimos.
+ */
+export function markPending(config, dir, patch = {}) {
+  return upsertProject(config, dir, {
+    mode: MODES.PENDING,
+    first_seen: config.projects?.[canonicalProjectKey(dir)]?.first_seen ?? new Date().toISOString(),
+    ...patch,
+  });
 }
 
 /** Write (or overwrite) a project entry, preserving fields the caller did not mention. */
