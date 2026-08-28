@@ -100,31 +100,94 @@ export function writeSettings(settings) {
   return writeJsonAtomic(settingsPath(), settings);
 }
 
-/** The three hooks the tool installs, as (event, matcher, command) triples. */
+/**
+ * Herramientas MCP de ClickUp que MUTAN el tablero.
+ *
+ * Es el matcher del hook `PostToolUse`, y de él depende toda la verificación: lo que no esté en
+ * esta lista no deja evidencia, y un claim que solo se cerró con una herramienta ausente acá
+ * quedaría marcado como "sin sincronizar" para siempre. Por eso la lista es generosa con las
+ * escrituras y no incluye ninguna lectura: una lectura no es prueba de que el trabajo se registró.
+ */
+export const MCP_WRITE_TOOLS = [
+  'clickup_create_task',
+  'clickup_update_task',
+  'clickup_create_task_comment',
+  'clickup_create_comment',
+  'clickup_update_comment',
+  'clickup_add_tag_to_task',
+  'clickup_remove_tag_from_task',
+  'clickup_move_task',
+  'clickup_add_task_to_list',
+  'clickup_add_task_dependency',
+  'clickup_attach_task_file',
+  'clickup_delete_task',
+];
+
+/** El matcher de PostToolUse, anclado para que no cace herramientas de otro servidor MCP. */
+export function mcpWriteMatcher() {
+  return `^mcp__claude_ai_ClickUp__(${MCP_WRITE_TOOLS.join('|')})$`;
+}
+
+/**
+ * Los hooks que instala la herramienta, como ternas (evento, matcher, comando).
+ *
+ * QUÉ CAMBIÓ Y POR QUÉ, porque este arreglo es el que redefine el producto:
+ *
+ *   · `UserPromptSubmit` SE FUE. Spawneaba node en cada prompt de cada proyecto de la máquina
+ *     —0.14 s medidos por turno en repos donde el resultado estaba garantizado que era 0— y en
+ *     los proyectos registrados inyectaba ~70 palabras por turno repitiendo lo que el modelo ya
+ *     había leído. Su única función real (que una sesión larga no se olvide tras compactar) la
+ *     cubre `SessionStart`, que se dispara también en `compact`.
+ *
+ *   · `PreToolUse` ahora incluye **Bash**. Sin eso el candado era decorativo: `cat > archivo`,
+ *     `sed -i`, `tee` y `git apply` pasaban de largo, y el modo `bypassPermissions` le RECOMIENDA
+ *     al agente exactamente esas formas por encima de Edit/Write.
+ *
+ *   · `PostToolUse` es NUEVO, y es la pieza que cierra el hueco de fondo. El conector de ClickUp
+ *     es OAuth de claude.ai: no hay token en disco y ningún proceso fuera de una sesión puede
+ *     llamarlo, así que el CLI nunca va a poder escribir en el tablero. Pero SÍ puede mirar: el
+ *     `tool_response` de cada mutación MCP es evidencia real, y con eso el registro local deja de
+ *     ser lo que el modelo dice que hizo.
+ *
+ *   · `Stop` es NUEVO, y es la obligación. Sale con 2 si hay una tarea reclamada sin ninguna
+ *     mutación registrada, y eso impide cerrar el turno. Es lo que convierte el protocolo de una
+ *     sugerencia en markdown a algo de lo que el modelo no puede salirse.
+ */
 export function hookSpecs(cliPath) {
   const cli = forwardSlash(cliPath);
   const invoke = (sub) => `node "${cli}" ${sub}`;
   return [
     {
       event: 'SessionStart',
+      // Sin matcher = todos los disparadores, `compact` incluido. Ese es justamente el que
+      // reemplaza al viejo hook por prompt: reinyecta el protocolo cuando el contexto se compacta.
       matcher: null,
       command: invoke('session-start'),
-      why: 'Announces the project’s ClickUp binding, or that it has none yet.',
-    },
-    {
-      event: 'UserPromptSubmit',
-      matcher: null,
-      command: invoke('prompt-hook'),
-      why: 'Re-states the protocol every turn so a long session cannot forget it.',
+      why: 'Anuncia el destino de ClickUp del proyecto, o que todavía no tiene ninguno.',
     },
     {
       event: 'PreToolUse',
-      matcher: 'Edit|Write|MultiEdit|NotebookEdit',
+      matcher: 'Edit|Write|MultiEdit|NotebookEdit|Bash',
       command: invoke('guard'),
-      why: 'Blocks writes when the project is configured and no task is claimed.',
+      why: 'Bloquea escrituras sin tarea, y pregunta una vez por los proyectos nuevos.',
+    },
+    {
+      event: 'PostToolUse',
+      matcher: mcpWriteMatcher(),
+      command: invoke('sync-hook'),
+      why: 'Registra las mutaciones REALES de ClickUp leyendo el resultado de la herramienta.',
+    },
+    {
+      event: 'Stop',
+      matcher: null,
+      command: invoke('stop-hook'),
+      why: 'No deja cerrar el turno con una tarea reclamada y sin sincronizar.',
     },
   ];
 }
+
+/** Cuántos hooks debería haber instalados. `doctor` lo usa para no tener el número a mano. */
+export const HOOK_COUNT = 4;
 
 function isOurHook(entry) {
   return typeof entry?.command === 'string' && entry.command.includes(HOOK_MARKER);

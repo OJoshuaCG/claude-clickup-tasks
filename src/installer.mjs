@@ -37,6 +37,7 @@ import {
   mergePermissions,
   unmergePermissions,
   inspectInstalled,
+  HOOK_COUNT,
 } from './lib/settings.mjs';
 import {
   Prompt,
@@ -939,8 +940,17 @@ function status() {
   if (!installed.length) {
     info('clickup-flow no está instalado.');
   } else {
-    ok(`${installed.length}/3 hooks registrados`);
-    for (const h of installed) note(`${h.event}${h.matcher ? ` [${h.matcher}]` : ''}`);
+    // Un conteo incompleto NO es `ok`. Decir "OK 3/4" es el mismo modo de fallo que hacía que
+    // `doctor` imprimiera "todo en orden" sobre un protocolo inerte: el número contradice la
+    // etiqueta, y la etiqueta es lo que la gente lee.
+    const completo = installed.length === HOOK_COUNT;
+    const linea = `${installed.length}/${HOOK_COUNT} hooks registrados`;
+    if (completo) ok(linea);
+    else warn(`${linea} — falta(n) ${HOOK_COUNT - installed.length}. Reinstalá para reconciliar.`);
+    for (const h of installed) {
+      const m = h.matcher ? ` [${h.matcher.length > 50 ? `${h.matcher.slice(0, 50)}…` : h.matcher}]` : '';
+      note(`${h.event}${m}`);
+    }
   }
 
   const { config, existed, ok: cOk, error: cErr } = loadConfig();

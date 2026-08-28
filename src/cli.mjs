@@ -21,7 +21,14 @@ import fs from 'node:fs';
 import path from 'node:path';
 import process from 'node:process';
 
-import { canonicalProjectKey, configPath, toolHome, statePath } from './lib/paths.mjs';
+import {
+  canonicalProjectKey,
+  configPath,
+  toolHome,
+  statePath,
+  projectRelative,
+} from './lib/paths.mjs';
+import { detectBashWrites } from './lib/bash-writes.mjs';
 import {
   MODES,
   ROLES,
@@ -33,9 +40,12 @@ import {
   saveConfig,
   upsertProject,
   identityReady,
+  isActive,
+  markPending,
   rememberGitEmail,
   gitEmail,
   resolveProject,
+  suggestFromOrg,
 } from './lib/config.mjs';
 import {
   readState,
@@ -45,9 +55,17 @@ import {
   clearExemption,
   dropState,
   listStateFiles,
+  recordMcpWrite,
+  markEvidenceSeen,
+  evidenceHealth,
+  hasMcpEvidence,
+  setSyncFailed,
+  clearSyncFailed,
+  bumpStopBlocks,
+  resetStopBlocks,
 } from './lib/state.mjs';
 import { buildContext, renderContext, shortSummary } from './lib/protocol.mjs';
-import { readSettings, inspectInstalled } from './lib/settings.mjs';
+import { readSettings, inspectInstalled, HOOK_COUNT } from './lib/settings.mjs';
 import { scanProject, importUsers } from './lib/migrate.mjs';
 
 // ---------------------------------------------------------------------------------------------
@@ -166,12 +184,26 @@ async function cmdSessionStart() {
   // decision they already made, every single session.
   if (ctx.excluded) return 0;
 
+  if (ctx.pending) {
+    const sug = ctx.orgSuggestions;
+    say(
+      '[clickup-flow] Este proyecto tiene una decisión PENDIENTE: se vio antes pero nadie dijo ' +
+        'todavía si acá se generan tareas de ClickUp. Mientras siga así el protocolo NO aplica y ' +
+        'se puede trabajar normalmente. Si surge el tema, preguntale al usuario y registrá la ' +
+        `respuesta: \`/clickup-setup\` (sí), \`${ctx.cli} project exclude\` (no)` +
+        (sug.length ? `, o \`${ctx.cli} project adopt --like "${sug[0].key}"\` (mismo destino que ${sug[0].key})` : '') +
+        '. No inventes coordenadas por tu cuenta.',
+    );
+    return 0;
+  }
+
   if (!ctx.registered) {
     say(
-      '[clickup-flow] Este proyecto no tiene espacio de ClickUp asignado. Si el trabajo de acá ' +
-        'debería quedar registrado en el tablero, ofrecele al usuario correr `/clickup-setup` ' +
-        '(una vez y queda). Mientras no esté configurado, el protocolo de tareas NO aplica y se ' +
-        'puede trabajar normalmente — no inventes coordenadas ni crees tareas por tu cuenta.',
+      '[clickup-flow] Este proyecto no tiene espacio de ClickUp asignado. El protocolo de tareas ' +
+        'NO aplica y se puede trabajar normalmente — no inventes coordenadas ni crees tareas por ' +
+        'tu cuenta. Si el trabajo de acá debería quedar registrado en el tablero, ofrecele al ' +
+        'usuario correr `/clickup-setup`. Si no lo hacés, la herramienta va a preguntar sola la ' +
+        'primera vez que se escriba código acá.',
     );
     return 0;
   }
@@ -209,47 +241,24 @@ async function cmdSessionStart() {
 // Hook: UserPromptSubmit
 // ---------------------------------------------------------------------------------------------
 
+/**
+ * OBSOLETO. Se conserva como salida inmediata, no como funcionalidad.
+ *
+ * POR QUÉ SE FUE. Este hook spawneaba `node` en CADA prompt de CADA proyecto de la máquina —
+ * medido, 0.14 s por turno en un repo NO registrado, donde el resultado estaba garantizado que
+ * era `return 0`. Con un proyecto registrado de N, el costo se pagaba N veces y el beneficio se
+ * cobraba una. Y cuando el proyecto SÍ estaba registrado, inyectaba ~70 palabras por turno para
+ * repetir algo que el modelo ya había leído en `SessionStart`: presupuesto de contexto quemado
+ * para decir lo mismo otra vez.
+ *
+ * Su única razón real era que una sesión larga no se olvidara del protocolo tras una compactación.
+ * Eso lo resuelve `SessionStart`, que TIENE un matcher `compact` y vuelve a inyectar el bloque
+ * cuando el contexto se compacta — una vez por compactación, no una vez por prompt.
+ *
+ * La función sobrevive porque un `settings.json` viejo puede seguir invocándola: un comando
+ * inexistente sería un error en cada turno hasta que el usuario reinstale.
+ */
 async function cmdPromptHook() {
-  const payload = await readHookInput();
-  const cwd = hookCwd(payload);
-  const { config, ok } = loadConfig();
-  if (!ok) return 0;
-
-  const ctx = buildContext(config, cwd);
-  // Unconfigured and excluded projects get nothing: a per-prompt nag in a repo that opted out
-  // is noise, and noise every turn is how a reminder stops being read at all.
-  if (!ctx.registered || ctx.excluded) return 0;
-
-  if (ctx.claim) {
-    say(
-      `[protocolo de tareas] TAREA EN CURSO: ${ctx.claim.task_id} — ` +
-        `${ctx.claim.title ?? 's/título'}${ctx.claim.role ? ` (rol ${ctx.claim.role})` : ''}. ` +
-        `Al terminar cerrala con \`/tarea fin ${ctx.claim.task_id}\`. Si la abandonás a mitad va a ` +
-        '`on hold` con el motivo, nunca se deja en `in progress`.',
-    );
-    return 0;
-  }
-
-  if (ctx.exemption.active) {
-    say(
-      `[protocolo de tareas] Exención vigente (${ctx.exemption.ageHours.toFixed(1)}h de ` +
-        `${ctx.exemption.limitHours}h): ${ctx.exemption.reason}. Se puede escribir sin tarea. ` +
-        'No la uses para saltear la búsqueda en ClickUp.',
-    );
-    return 0;
-  }
-
-  const parts = [
-    '[protocolo de tareas] Ninguna tarea reclamada en este proyecto.',
-    'Si lo que sigue es implementar, arreglar, migrar o refactorizar algo, primero corré',
-    '`clickup-flow context` (o `/tarea <descripción>`) para decidir si amerita tarea y validar en',
-    'ClickUp que nadie más la esté haciendo. Responder preguntas, leer código, investigar o',
-    'explicar NO requiere reclamar tarea.',
-  ];
-  if (!ctx.identityReady) {
-    parts.push('OJO: la identidad de ClickUp todavía no está resuelta — no asignes tareas.');
-  }
-  say(parts.join(' '));
   return 0;
 }
 
@@ -257,17 +266,21 @@ async function cmdPromptHook() {
 // Hook: PreToolUse — the actual lock
 // ---------------------------------------------------------------------------------------------
 
-/** Editing Claude's own configuration is not the shared product work the lock protects. */
 /**
  * Archivos que el candado nunca bloquea: la configuración de Claude Code y del propio flujo.
  *
- * La exención existe justamente para que la herramienta no se bloquee a sí misma — pedirle una
- * tarea de ClickUp para poder escribir el CLAUDE.md que configura ClickUp es un círculo.
+ * La exención existe para que la herramienta no se bloquee a sí misma — pedir una tarea de
+ * ClickUp para poder escribir el CLAUDE.md que configura ClickUp es un círculo.
  *
- * Las comparaciones necesitan un separador delante (`/CLAUDE.md`, no `CLAUDE.md`) para no
- * cazar `MI-CLAUDE.md`. Eso hacía que una ruta RELATIVA no matcheara nunca: con
- * `file_path: "CLAUDE.md"` el guard bloqueaba, que es exactamente lo contrario de lo que la
- * exención busca. Por eso la ruta se resuelve primero contra el directorio del hook.
+ * POR QUÉ ESTO SE REESCRIBIÓ. La versión anterior preguntaba `p.includes('/.claude/')` sobre la
+ * ruta ABSOLUTA. Claude Code crea sus worktrees en `<repo>/.claude/worktrees/<nombre>/`, así que
+ * trabajar en un worktree eximía el proyecto ENTERO: cada archivo de código, no solo la
+ * configuración. Un usuario con `worktree.baseRef: head` en sus settings —o sea, alguien que usa
+ * worktrees— tenía el candado apagado sin enterarse.
+ *
+ * Un `includes()` sobre un absoluto no puede distinguir "la config de la herramienta" de "todo el
+ * repo, visto desde otro lado". La comparación tiene que ser sobre la ruta RELATIVA al proyecto y
+ * ANCLADA al principio, con `worktrees/` excluido explícitamente.
  */
 function isTrivialTarget(filePath, baseDir = null) {
   if (!filePath) return false;
@@ -277,13 +290,53 @@ function isTrivialTarget(filePath, baseDir = null) {
       ? crudo
       : path.resolve(baseDir || process.cwd(), crudo);
   const p = canonicalProjectKey(absoluto);
-  return (
-    p.includes('/.claude/') ||
-    p.endsWith('/CLAUDE.md') ||
-    p.endsWith('/claude.md') ||
-    p.includes('/.claude-plugin/') ||
-    p.endsWith('/.gitignore')
-  );
+
+  const nombre = p.split('/').pop() ?? '';
+  if (nombre === 'CLAUDE.md' || nombre === 'claude.md' || nombre === '.gitignore') return true;
+
+  const base = baseDir ? canonicalProjectKey(baseDir) : null;
+  const rel = base ? projectRelative(p, base) : null;
+
+  // Fuera del proyecto no hay nada que proteger: el candado cuida el trabajo de ESTE proyecto.
+  // Editar el `~/.claude` global, o un archivo de otro repo, no es lo que el tablero registra.
+  if (base && rel === null) return true;
+
+  // Sin `baseDir` (llamadas sueltas, tests unitarios) se cae al absoluto, pero con el MISMO
+  // anclaje: `/.claude/` sí, `/.claude/worktrees/` no.
+  const objetivo = rel ?? p;
+  if (/(^|\/)\.claude\/worktrees\//.test(objetivo)) return false;
+  return /(^|\/)\.claude(-plugin)?\//.test(objetivo);
+}
+
+/**
+ * ¿Este uso de herramienta escribe en el disco, y sobre qué?
+ *
+ * Unifica las herramientas de edición con Bash. Bash entró al matcher porque sin él el candado
+ * era decorativo: `cat > archivo <<EOF`, `sed -i`, `tee`, `git apply` y `python -c` pasaban de
+ * largo, y el modo `bypassPermissions` le RECOMIENDA al agente justamente esas formas.
+ */
+function writeIntent(payload, cwd) {
+  const tool = payload?.tool_name ?? '';
+
+  if (tool === 'Bash') {
+    const d = detectBashWrites(payload?.tool_input?.command);
+    if (!d.writes) return { writes: false, tool, trivial: false, targets: [], reasons: [] };
+    // Un destino que no se puede nombrar (`git apply`, un script embebido) NUNCA es trivial:
+    // si no sé qué archivo toca, no puedo afirmar que sea inofensivo.
+    const trivial =
+      !d.unknownTarget && d.targets.length > 0 && d.targets.every((t) => isTrivialTarget(t, cwd));
+    return { writes: true, tool, trivial, targets: d.targets, reasons: d.reasons };
+  }
+
+  // Para Edit/Write/MultiEdit/NotebookEdit el matcher ya garantizó que se escribe.
+  const file = targetPath(payload);
+  return {
+    writes: true,
+    tool,
+    trivial: isTrivialTarget(file, cwd),
+    targets: file ? [file] : [],
+    reasons: [],
+  };
 }
 
 function targetPath(payload) {
@@ -300,20 +353,69 @@ async function cmdGuard() {
 
   const ctx = buildContext(config, cwd);
 
-  // ---- every fail-open branch, stated explicitly ----
-  if (!ctx.registered) return 0; // project was never configured
-  if (ctx.excluded) return 0; // user said no, on the record
+  // El usuario ya dijo que no, por escrito. No se re-litiga.
+  if (ctx.excluded) return 0;
+
+  // ¿Esta herramienta escribe algo? Si no, no hay nada que custodiar — y tampoco es el momento
+  // de preguntar por la configuración del proyecto: interrumpir un `ls` con una pregunta sobre
+  // ClickUp es exactamente cómo se gana el derecho a que te desinstalen.
+  const intento = writeIntent(payload, cwd);
+  if (!intento.writes) return 0;
+  if (intento.trivial) return 0; // configurando la herramienta, no haciendo el trabajo
+
+  // ---- proyecto sin decisión: se pregunta UNA vez ----
+  if (ctx.status === 'unknown' || ctx.status === 'pending') {
+    return preguntarPorProyecto(config, ctx, cwd);
+  }
+
+  // ---- proyecto activo ----
+
+  // Una sincronización que quedó pendiente de una sesión anterior bloquea ANTES que cualquier
+  // otra cosa, incluso antes del interruptor del candado. No es "falta reclamar una tarea": es
+  // "el tablero quedó mintiendo sobre trabajo que ya se hizo", y eso no se arregla solo.
+  // Un `sync_failed` heredado de cuando el mecanismo de evidencia no funcionaba no puede trabar
+  // el proyecto: se limpia solo y se sigue. La deuda solo es real si el registro es confiable.
+  if (ctx.syncFailed && !ctx.evidence.everSeen) {
+    clearSyncFailed(ctx.matchedKey || ctx.cwd);
+    return 0;
+  }
+
+  if (ctx.syncFailed) {
+    err(
+      [
+        'BLOQUEADO: hay trabajo SIN SINCRONIZAR con ClickUp en este proyecto.',
+        '',
+        `Tarea: ${ctx.syncFailed.task_id ?? '(sin id registrado)'}`,
+        `Desde: ${ctx.syncFailed.at}`,
+        `Motivo: ${ctx.syncFailed.reason}`,
+        '',
+        'Un turno anterior terminó con una tarea reclamada de la que el harness NUNCA vio una',
+        'mutación en ClickUp. O sea: el tablero no refleja lo que se hizo acá, y seguir',
+        'escribiendo encima agranda la mentira.',
+        '',
+        'Resolvelo de una de estas dos formas:',
+        '',
+        'A) La tarea existe y hay que actualizarla → hacelo por MCP ahora (comentario y estado).',
+        '   El hook lo va a registrar solo y el bloqueo se levanta en cuanto vea la mutación.',
+        '',
+        'B) Era un registro equivocado y no hay nada que sincronizar:',
+        '',
+        `        ${ctx.cli} release --force`,
+      ].join('\n'),
+    );
+    return 2;
+  }
+
   if (!ctx.defaults.block_writes_without_task) return 0; // lock switched off at install
   if (ctx.claim) return 0; // a task is claimed
   if (ctx.exemption.active) return 0; // a live, written-down exemption
 
-  const file = targetPath(payload);
-  if (isTrivialTarget(file, cwd)) return 0; // configuring the tooling, not doing the work
-
   // ---- fail closed ----
   if (ctx.exemption.expired) {
     const age =
-      ctx.exemption.ageHours === Infinity ? 'sin timestamp legible' : `${Math.floor(ctx.exemption.ageHours)}h`;
+      ctx.exemption.ageHours === Infinity
+        ? 'sin timestamp legible'
+        : `${Math.floor(ctx.exemption.ageHours)}h`;
     err(
       `BLOQUEADO por el protocolo de tareas: la exención VENCIÓ (${age}, el límite son ` +
         `${ctx.exemption.limitHours}h). Motivo que tenía: "${ctx.exemption.reason}".\n\n` +
@@ -329,6 +431,12 @@ async function cmdGuard() {
     [
       'BLOQUEADO por el protocolo de tareas de este proyecto (clickup-flow).',
       '',
+      ...(intento.tool === 'Bash'
+        ? [
+            `El comando de Bash escribe archivos: ${intento.reasons.join('; ')}.`,
+            '',
+          ]
+        : []),
       'No hay tarea reclamada ni exención declarada, así que no se puede escribir todavía. Este',
       'candado existe para no rehacer trabajo que alguien ya hizo o está haciendo ahora mismo en',
       'un tablero compartido por varias personas.',
@@ -353,6 +461,304 @@ async function cmdGuard() {
       '',
       '   Vale para: correcciones triviales, ajustes del entorno local, o cambios pedidos dentro',
       '   de un trabajo ya reclamado. NO vale como atajo para saltearse la búsqueda en ClickUp.',
+    ].join('\n'),
+  );
+  return 2;
+}
+
+/**
+ * La pregunta que faltaba: "¿este proyecto nuevo entra al flujo o no?"
+ *
+ * ESTE ES EL PUNTO 2 DE LA CRÍTICA, y era el que rompía el objetivo declarado. El registro global
+ * existía y estaba bien resuelto, pero se poblaba EXCLUSIVAMENTE a mano con un slash command que
+ * un humano tenía que tipear. Un proyecto nunca visto y uno rechazado se comportaban idéntico, y
+ * la única diferencia era un mensaje que le PEDÍA al modelo que ofreciera el setup. El modelo
+ * puede no ofrecerlo. Es exactamente lo que pasó.
+ *
+ * Ahora pregunta un hook, que no se olvida. Tres propiedades que hacen que esto sea tolerable
+ * en cada repo de la máquina, y no una plaga:
+ *
+ *   1. Solo dispara ante una ESCRITURA real de trabajo. Leer, buscar y responder no la activan.
+ *   2. Pregunta y pospone EN EL MISMO ACTO. Si el usuario ignora el bloqueo, el trabajo sigue
+ *      inmediatamente: el segundo intento ya no bloquea. Un candado que insiste se desinstala.
+ *   3. `defaults.ask_new_projects: false` la apaga para toda la máquina.
+ */
+function preguntarPorProyecto(config, ctx, cwd) {
+  const d = ctx.defaults;
+
+  // Aunque no se pregunte, se DEJA CONSTANCIA de la carpeta. Sin el registro no hay forma de
+  // preguntar una sola vez más adelante, ni de que `doctor` sepa qué proyectos vio.
+  const yaVisto = ctx.status === 'pending';
+
+  if (!d.ask_new_projects || ctx.snoozed) {
+    if (!yaVisto) {
+      markPending(config, cwd);
+      saveConfig(config);
+    }
+    return 0;
+  }
+
+  const dias = Number(d.snooze_days) > 0 ? Number(d.snooze_days) : 7;
+  const entrada = ctx.project ?? {};
+  markPending(config, cwd, {
+    ask_count: (entrada.ask_count ?? 0) + 1,
+    last_asked_at: new Date().toISOString(),
+    // Posponer AL PREGUNTAR, no al contestar. Es lo que garantiza que el bloqueo sea uno solo.
+    snoozed_until: new Date(Date.now() + dias * 86_400_000).toISOString(),
+  });
+  saveConfig(config);
+
+  const sug = ctx.orgSuggestions;
+  const lineas = [
+    'clickup-flow: ¿este proyecto genera tareas en ClickUp?',
+    '',
+    `Carpeta: ${ctx.cwd}`,
+    '',
+    'Es la primera vez que se escribe código acá con la herramienta instalada, y no hay ninguna',
+    'respuesta registrada para esta carpeta. Se pregunta UNA sola vez: contestes lo que contestes',
+    `—o si no contestás nada— el próximo intento de escritura ya no se bloquea (se pospone ${dias} días).`,
+    '',
+  ];
+
+  if (sug.length) {
+    const { key, entry, org } = sug[0];
+    lineas.push(
+      `Detectado: este repo pertenece a **${org}**, igual que \`${key}\`, que ya está configurado`,
+      `y apunta a ${formatListPath(entry)}.`,
+      '',
+      'Si va al mismo lugar, esto lo resuelve en un comando:',
+      '',
+      `    ${ctx.cli} project adopt --like "${key}"`,
+      '',
+    );
+  }
+
+  lineas.push(
+    'PREGUNTALE AL USUARIO cuál de los tres, y ejecutá su respuesta. No decidas vos.',
+    '',
+    '  1. Sí, acá se gestionan tareas',
+    '     → /clickup-setup     (pregunta la lista destino y el modo de trabajo)',
+    '',
+    '  2. No, este proyecto no usa ClickUp',
+    `     → ${ctx.cli} project exclude --reason "<motivo>"`,
+    '        Queda registrado y no se vuelve a preguntar nunca.',
+    '',
+    '  3. Ahora no',
+    `     → ${ctx.cli} project snooze --days ${dias}`,
+    '',
+    `Para no volver a ver esto en NINGÚN proyecto: ${ctx.cli} config set --key defaults.ask_new_projects --value false`,
+  );
+
+  err(lineas.join('\n'));
+  return 2;
+}
+
+// ---------------------------------------------------------------------------------------------
+// Hook: PostToolUse — la evidencia
+// ---------------------------------------------------------------------------------------------
+
+/** Claves cuyo valor es, sin ambigüedad, el id de una TAREA (no de una lista, carpeta o espacio). */
+const CLAVES_TAREA = new Set(['task_id', 'taskId', 'taskid']);
+
+/** Un id de ClickUp plausible. Deliberadamente laxo: los custom ids son `ABC-123`. */
+const ID_PLAUSIBLE = /^[A-Za-z0-9][A-Za-z0-9_-]{3,39}$/;
+
+/**
+ * Sacar los ids de tarea de una llamada MCP, mirando entrada Y respuesta.
+ *
+ * Los tres caminos son deliberados y van de más a menos seguro:
+ *
+ *   1. Una clave `task_id`/`taskId` en cualquier nivel. Inequívoca — es la que traen
+ *      `update_task` y `create_task_comment` en su ENTRADA.
+ *   2. Una URL `app.clickup.com/t/<id>`. También inequívoca, y es lo que devuelve `create_task`.
+ *   3. El `id` en la RAÍZ de la respuesta (o de un bloque de texto con JSON adentro).
+ *
+ * Lo que NO se hace, a propósito: aceptar cualquier clave `id` a cualquier profundidad. La
+ * respuesta de una tarea trae anidados `list.id`, `folder.id`, `space.id` y `creator.id`, y
+ * confundir el id de una lista con el de una tarea marcaría como verificado un claim que no lo
+ * está. Un falso "verificado" es peor que no verificar: reintroduce exactamente la confianza sin
+ * evidencia que este hook vino a eliminar.
+ */
+function extractTaskIds(payload) {
+  const out = new Set();
+  const agregar = (v) => {
+    const t = String(v ?? '').trim();
+    if (t && ID_PLAUSIBLE.test(t)) out.add(t);
+  };
+
+  const visitar = (valor, clave) => {
+    if (valor == null) return;
+    if (typeof valor === 'number') {
+      if (CLAVES_TAREA.has(clave)) agregar(valor);
+      return;
+    }
+    if (typeof valor === 'string') {
+      if (CLAVES_TAREA.has(clave)) agregar(valor);
+      for (const m of valor.matchAll(/app\.clickup\.com\/t\/([A-Za-z0-9_-]{4,40})/g)) agregar(m[1]);
+      for (const m of valor.matchAll(/"(?:task_id|taskId)"\s*:\s*"([^"]{4,40})"/g)) agregar(m[1]);
+      // Un bloque de texto que en realidad es JSON: se parsea y se le aplica la regla 3.
+      const crudo = valor.trim();
+      if ((crudo.startsWith('{') || crudo.startsWith('[')) && crudo.length < 500_000) {
+        try {
+          raiz(JSON.parse(crudo));
+        } catch {
+          /* no era JSON: ya se le pasaron las regex de arriba */
+        }
+      }
+      return;
+    }
+    if (Array.isArray(valor)) {
+      for (const x of valor) visitar(x, clave);
+      return;
+    }
+    if (typeof valor === 'object') {
+      for (const [k, x] of Object.entries(valor)) visitar(x, k);
+    }
+  };
+
+  /** Regla 3: el `id` de la raíz de un objeto-tarea. Solo la raíz, nunca los anidados. */
+  const raiz = (obj) => {
+    if (!obj || typeof obj !== 'object') return;
+    if (Array.isArray(obj)) {
+      for (const x of obj) raiz(x);
+      return;
+    }
+    if (obj.id !== undefined && (obj.name !== undefined || obj.url !== undefined)) agregar(obj.id);
+    // Las respuestas MCP suelen venir envueltas: `{ data: {...} }`, `{ task: {...} }`.
+    for (const k of ['data', 'task', 'result']) if (obj[k]) raiz(obj[k]);
+    visitar(obj, null);
+  };
+
+  visitar(payload?.tool_input, null);
+  raiz(payload?.tool_response);
+  return [...out];
+}
+
+/**
+ * Hook `PostToolUse` sobre las herramientas de ESCRITURA del MCP de ClickUp.
+ *
+ * Acá se cierra el hueco que la crítica llamó "el defecto de fondo": el sistema prometía
+ * garantías deterministas sobre una capa de ejecución puramente sugestiva. La respuesta no fue
+ * darle credenciales al CLI —el conector de ClickUp es OAuth de claude.ai, no hay token en disco
+ * y ningún proceso fuera de una sesión puede llamarlo— sino dejar de depender de la palabra del
+ * modelo: el harness entrega el `tool_response` REAL, y eso es evidencia, no declaración.
+ *
+ * El modelo sigue siendo el único que puede escribir en ClickUp. Deja de ser el único que sabe
+ * si escribió.
+ */
+async function cmdSyncHook() {
+  const payload = await readHookInput();
+  const cwd = hookCwd(payload);
+  const { config, ok } = loadConfig();
+  if (!ok) return 0;
+
+  const ctx = buildContext(config, cwd);
+  if (!ctx.registered) return 0;
+
+  const ids = extractTaskIds(payload);
+  if (!ids.length) return 0;
+
+  const clave = ctx.matchedKey || ctx.cwd;
+  for (const id of ids) {
+    recordMcpWrite(clave, { tool: payload?.tool_name ?? null, taskId: id });
+  }
+  // Que este hook haya corrido y sacado un id es la PRUEBA de que el matcher del PostToolUse
+  // funciona en esta instalación. Sin esa prueba, la capa de obligación se queda desarmada —
+  // ver `evidenceHealth` en state.mjs.
+  markEvidenceSeen();
+  return 0;
+}
+
+// ---------------------------------------------------------------------------------------------
+// Hook: Stop — la obligación
+// ---------------------------------------------------------------------------------------------
+
+/**
+ * Cuántas veces se bloquea el cierre del turno antes de soltar.
+ *
+ * Dos, y ni una más. Un hook `Stop` que nunca deja terminar cuelga la sesión, y una sesión
+ * colgada se arregla desinstalando la herramienta. La garantía no está en bloquear para siempre:
+ * está en que al soltar queda escrito `sync_failed`, y el candado de escritura no vuelve a
+ * abrirse en este proyecto hasta reconciliar. El fallo no se pierde, se traslada.
+ */
+const MAX_BLOQUEOS_STOP = 2;
+
+async function cmdStopHook() {
+  const payload = await readHookInput();
+  const cwd = hookCwd(payload);
+  const { config, ok } = loadConfig();
+  if (!ok) return 0;
+
+  const ctx = buildContext(config, cwd);
+  if (!ctx.registered) return 0;
+
+  const clave = ctx.matchedKey || ctx.cwd;
+
+  // Sin tarea reclamada no hay nada que exigir; con una verificada, el trabajo está reflejado.
+  if (!ctx.claim || ctx.claimVerified) {
+    resetStopBlocks(clave);
+    return 0;
+  }
+
+  // LA VÁLVULA DE SEGURIDAD.
+  //
+  // Antes de exigir, hay que poder distinguir "esta tarea no se cerró" de "el mecanismo que
+  // detecta los cierres nunca funcionó acá". Sin esa distinción, un matcher que no casa el
+  // nombre de las herramientas del conector bloquea TODOS los turnos de TODOS los proyectos
+  // para siempre — y el mensaje acusa al usuario de no sincronizar algo que sincronizó bien.
+  //
+  // Ese modo de fallo es peor que el problema que la obligación resuelve, y además rompe la
+  // regla que gobierna el resto del repo: fallar abierto cuando algo no está bien configurado.
+  // Así que la obligación se ARMA SOLA recién cuando el `PostToolUse` demostró correr una vez.
+  if (!ctx.evidence.everSeen) {
+    resetStopBlocks(clave);
+    err(
+      `[clickup-flow] ${ctx.claim.task_id} figura reclamada y sin cerrar, pero NO se exige nada: ` +
+        'el hook `PostToolUse` que registra las mutaciones de ClickUp nunca corrió en esta ' +
+        'instalación, así que no hay forma de saber si el trabajo se registró o no. ' +
+        'Probablemente el matcher no coincide con el nombre de las herramientas del conector — ' +
+        `corré \`${ctx.cli} doctor\` para verlo. Mientras tanto se falla ABIERTO, a propósito.`,
+    );
+    return 0;
+  }
+
+  const bloqueos = bumpStopBlocks(clave, payload?.session_id ?? null);
+
+  if (bloqueos > MAX_BLOQUEOS_STOP) {
+    setSyncFailed(clave, {
+      taskId: ctx.claim.task_id,
+      reason: `el turno se cerró tras ${MAX_BLOQUEOS_STOP} avisos sin ninguna mutación MCP sobre ${ctx.claim.task_id}`,
+    });
+    resetStopBlocks(clave);
+    err(
+      `[clickup-flow] Se cierra el turno con ${ctx.claim.task_id} SIN sincronizar. Queda ` +
+        'registrado: el candado de escritura de este proyecto no se vuelve a abrir hasta que ' +
+        'haya una mutación real en ClickUp sobre esa tarea.',
+    );
+    return 0;
+  }
+
+  err(
+    [
+      `No termines todavía: la tarea ${ctx.claim.task_id} está reclamada y NO hay ninguna`,
+      'mutación de ClickUp registrada para ella en este proyecto.',
+      '',
+      `Tarea: ${ctx.claim.title ?? 's/título'}`,
+      `Reclamada: ${ctx.claim.claimed_at}`,
+      '',
+      'Esto no lo dice el modelo: lo dice el harness. El hook `PostToolUse` registra cada',
+      'llamada de escritura al MCP de ClickUp, y para esta tarea no vio ninguna.',
+      '',
+      'Antes de cerrar, hacé lo que corresponda por MCP:',
+      '',
+      `  · Si la tarea existe y el trabajo avanzó → comentario de avance en ${ctx.claim.task_id}.`,
+      '  · Si el trabajo terminó → estado final + comentario de cierre, y después',
+      `    \`${ctx.cli} release\`.`,
+      `  · Si te retirás a mitad → \`on hold\` con el motivo, y \`${ctx.cli} release\`.`,
+      `  · Si el claim fue un error → \`${ctx.cli} release --force\`.`,
+      '',
+      `(Este aviso aparece ${MAX_BLOQUEOS_STOP} veces como máximo. Después el turno cierra igual,`,
+      'pero el proyecto queda bloqueado para escribir hasta reconciliar.)',
     ].join('\n'),
   );
   return 2;
@@ -537,14 +943,33 @@ function cmdClaim(args) {
 
   say(`Tarea ${taskId} reclamada. Escritura desbloqueada.`);
   say(`  claim: ${file}`);
+
+  // El claim se verifica con la evidencia que dejó `PostToolUse`, no con lo que diga el llamador.
+  // Si el orden fue el natural —crear la tarea por MCP y después registrarla— la evidencia ya
+  // está y esto no aparece. Si aparece, es porque se reclamó un id que el harness nunca vio.
+  if (!readState(cwd).claim?.verified_at) {
+    say('');
+    say(`⚠ Sin evidencia todavía: el harness no registró ninguna llamada MCP sobre ${taskId}.`);
+    say('  Si la tarea ya existe, la próxima mutación (comentario o cambio de estado) la verifica.');
+    say('  Si NO existe, creala ahora: el turno no va a poder cerrarse sin eso.');
+  }
   return 0;
 }
 
 function cmdRelease(args) {
   const cwd = canonicalProjectKey(args.cwd || process.cwd());
-  const current = readState(cwd).claim;
+  const state = readState(cwd);
+  const current = state.claim;
 
   if (!current) {
+    // `release --force` sin claim sigue sirviendo para una cosa: saldar una sincronización que
+    // quedó fallida. Es la salida "el registro estaba equivocado, no hay nada que sincronizar"
+    // que el guard le ofrece al usuario, y sin esto no habría forma de destrabarse.
+    if (args.force && state.sync_failed) {
+      clearSyncFailed(cwd);
+      say('Sincronización pendiente descartada por --force. El candado vuelve a la normalidad.');
+      return 0;
+    }
     say('No había ningún claim.');
     return 0;
   }
@@ -567,8 +992,61 @@ function cmdRelease(args) {
     return 1;
   }
 
+  // No se suelta una tarea de la que el harness nunca vio una mutación.
+  //
+  // Este es el chequeo que convierte el cierre en algo verificado en vez de anunciado. El hook
+  // `PostToolUse` registra cada escritura al MCP de ClickUp con el id que devolvió la
+  // herramienta; si para esta tarea no hay ninguna posterior al claim, entonces se reclamó, se
+  // trabajó, y el tablero quedó exactamente igual que antes. Soltar el claim ahí borraría la
+  // única evidencia de que ese trabajo pasó.
+  //
+  // `--force` existe porque hay un caso legítimo —el claim fue un error— y porque un candado sin
+  // salida documentada es un candado que se saltea por afuera.
+  // Misma válvula que en el `stop-hook`: si el mecanismo de evidencia nunca funcionó, negarse a
+  // soltar solo trabaría el proyecto sin motivo. Se suelta, avisando fuerte.
+  const salud = evidenceHealth();
+  if (!hasMcpEvidence(state, current.task_id, current.claimed_at) && !salud.everSeen) {
+    clearClaim(cwd);
+    if (state.sync_failed) clearSyncFailed(cwd);
+    say(`Claim liberado (${current.task_id ?? 's/id'}).`);
+    say('');
+    say('⚠ Se soltó SIN verificar, y no por culpa tuya: el hook `PostToolUse` que registra las');
+    say('  mutaciones de ClickUp nunca corrió en esta instalación, así que no hay con qué');
+    say('  verificar. Revisá `clickup-flow doctor` — el matcher probablemente no coincide con el');
+    say('  nombre de las herramientas de tu conector.');
+    return 0;
+  }
+
+  if (!hasMcpEvidence(state, current.task_id, current.claimed_at) && !args.force) {
+    err(
+      [
+        `No se puede soltar ${current.task_id}: no hay NINGUNA mutación de ClickUp registrada`,
+        'para esa tarea desde que se reclamó.',
+        '',
+        `  reclamada:      ${current.claimed_at}`,
+        `  mutaciones MCP: ninguna sobre ${current.task_id}`,
+        '',
+        'Esto no es una sospecha del modelo: el hook `PostToolUse` mira el resultado real de cada',
+        'llamada al MCP de ClickUp, y sobre esta tarea no vio ninguna. Si se soltara así, el',
+        'tablero quedaría sin rastro de este trabajo.',
+        '',
+        'Cerrala de verdad primero — estado final y comentario de cierre por MCP — y volvé a',
+        'correr `release`. El registro se actualiza solo.',
+        '',
+        'Si el claim fue un error y no hay nada que cerrar en ClickUp:  release --force',
+      ].join('\n'),
+    );
+    return 1;
+  }
+
+  const sinEvidencia = !hasMcpEvidence(state, current.task_id, current.claimed_at);
   clearClaim(cwd);
+  if (state.sync_failed) clearSyncFailed(cwd);
   say(`Claim liberado (${current.task_id ?? 's/id'}). El candado vuelve a pedir tarea.`);
+  if (sinEvidencia) {
+    say('⚠ Se soltó con --force SIN evidencia de ninguna mutación en ClickUp.');
+    say('  Si esa tarea existe, quedó abierta y sin el registro de este trabajo.');
+  }
   return 0;
 }
 
@@ -784,6 +1262,84 @@ function cmdProject(args) {
     return 0;
   }
 
+  if (sub === 'snooze') {
+    const dias = Number(args.days) > 0 ? Number(args.days) : (config.defaults?.snooze_days ?? 7);
+    const previa = config.projects?.[cwd] ?? {};
+    markPending(config, cwd, {
+      snoozed_until: new Date(Date.now() + dias * 86_400_000).toISOString(),
+      ask_count: previa.ask_count ?? 0,
+    });
+    saveConfig(config);
+    say(`Pospuesto ${dias} día(s): ${cwd}`);
+    say('El candado queda abierto y no se vuelve a preguntar en ese plazo.');
+    return 0;
+  }
+
+  if (sub === 'adopt') {
+    // Adoptar es copiar el DESTINO de un proyecto ya configurado, no inventarlo. Es la salida
+    // rápida del descubrimiento por organización: cuando el repo nuevo pertenece al mismo `org`
+    // que otro ya resuelto, el destino correcto casi siempre es el mismo, y preguntarlo campo por
+    // campo otra vez es la fricción que hacía que nadie configurara el segundo proyecto.
+    let plantillaKey = args.like ? canonicalProjectKey(String(args.like)) : null;
+
+    if (!plantillaKey) {
+      const sug = suggestFromOrg(config, cwd);
+      if (sug.length === 1) {
+        plantillaKey = sug[0].key;
+      } else if (sug.length > 1) {
+        err('Hay varios proyectos de la misma organización. Elegí uno con --like:');
+        for (const { key, entry } of sug) err(`  --like "${key}"   → ${formatListPath(entry)}`);
+        return 1;
+      } else {
+        err('Falta --like <ruta de un proyecto ya configurado>. `project list` muestra cuáles hay.');
+        return 1;
+      }
+    }
+
+    const plantilla = config.projects?.[plantillaKey];
+    if (!plantilla) {
+      err(`No hay ningún proyecto registrado en ${plantillaKey}. \`project list\` muestra los que hay.`);
+      return 1;
+    }
+    if (!isActive(plantilla)) {
+      err(`\`${plantillaKey}\` está en estado \`${plantilla.mode}\`: no tiene un destino que copiar.`);
+      return 1;
+    }
+
+    // Se copia SOLO el destino y las convenciones del tablero. Rol y contraparte NO: son
+    // propiedades de este proyecto en la cadena de entrega, no del lugar donde viven las tareas,
+    // y heredarlas silenciosamente crearía handoffs hacia contrapartes que no le corresponden.
+    const heredables = [
+      'mode',
+      'workspace_id',
+      'space_id',
+      'space_name',
+      'folder_id',
+      'folder_name',
+      'list_id',
+      'list_name',
+      'statuses',
+      'umbrella_task_id',
+    ];
+    const patch = {};
+    for (const k of heredables) if (plantilla[k] !== undefined) patch[k] = plantilla[k];
+    patch.adopted_from = plantillaKey;
+    patch.snoozed_until = null;
+
+    const entry = upsertProject(config, cwd, patch);
+    saveConfig(config);
+    say(`Proyecto adoptado desde ${plantillaKey}: ${entry.path}`);
+    say(`Modo ${entry.mode} · ${formatListPath(entry)}`);
+    if (entry.mode === MODES.UMBRELLA && entry.umbrella_task_id === plantilla.umbrella_task_id) {
+      say('');
+      say(
+        `OJO: heredó la tarea paraguas \`${entry.umbrella_task_id}\` del proyecto plantilla. Si este ` +
+          'proyecto necesita la suya, cambiala con `project set --umbrella-task-id <id>`.',
+      );
+    }
+    return 0;
+  }
+
   if (sub === 'exclude') {
     // `excluded_at` responde DESDE CUÁNDO está excluido. Volver a excluir algo ya excluido no es
     // una exclusión nueva: re-sellarlo perdería la fecha original sin aportar nada.
@@ -941,6 +1497,8 @@ function cmdProject(args) {
     // Re-registering a previously excluded project has to clear the exclusion, or `context`
     // would keep reporting "excluded" from the leftover fields.
     patch.excluded_reason = null;
+    // Y configurar ES contestar la pregunta pendiente: el aplazamiento deja de tener sentido.
+    patch.snoozed_until = null;
     patch.excluded_at = null;
 
     // The real status names of this board. A name that does not exist on the list makes every
@@ -1253,13 +1811,85 @@ function cmdConfig(args) {
   return 1;
 }
 
-function cmdDoctor() {
+function cmdDoctor(args = { _: [] }) {
   const lines = [];
   // Problems break the protocol; warnings are things worth knowing that still work. Mixing
   // them turns `doctor` into something people stop reading — a healthy install has to be able
   // to say "todo en orden" and mean it.
   let problems = 0;
   let warnings = 0;
+
+  // ---- ESTE directorio, antes que nada ----
+  //
+  // `doctor` verificaba la instalación y nunca el efecto acá. En un repo donde el protocolo
+  // estaba completamente inerte imprimía "Todo en orden", que es la respuesta más engañosa
+  // posible a "¿por qué no se ejecuta?". Un diagnóstico que no puede reproducir el síntoma del
+  // usuario no es un diagnóstico.
+  //
+  // Por eso esta sección va PRIMERO y responde la pregunta que trae quien corre el comando:
+  // ¿el protocolo se aplica en la carpeta donde estoy parado, sí o no?
+  {
+    const cwd = canonicalProjectKey(args.cwd || process.cwd());
+    const { config: c, ok: cOk } = loadConfig();
+    lines.push('ESTE DIRECTORIO');
+    lines.push(`  ruta          ${cwd}`);
+    if (!cOk) {
+      lines.push('  protocolo     NO se aplica — la configuración global es ilegible (ver abajo)');
+    } else {
+      const ctx = buildContext(c, cwd);
+      const comoSeResolvio =
+        ctx.matchedBy && ctx.matchedBy !== 'path' ? ` (por ${ctx.matchedBy}: ${ctx.matchedKey})` : '';
+      switch (ctx.status) {
+        case 'active':
+          lines.push(`  estado        REGISTRADO${comoSeResolvio}`);
+          lines.push(`  destino       ${formatListPath(ctx.project)}`);
+          lines.push('  protocolo     SÍ se aplica acá');
+          lines.push(
+            `  candado       ${ctx.defaults.block_writes_without_task ? 'ARMADO' : 'desactivado (defaults.block_writes_without_task=false)'}`,
+          );
+          if (ctx.claim) {
+            lines.push(
+              `  tarea         ${ctx.claim.task_id}${ctx.claimVerified ? ' — verificada por el harness' : ' — SIN VERIFICAR (ninguna mutación MCP registrada)'}`,
+            );
+            if (!ctx.claimVerified) problems++;
+          } else if (ctx.exemption.active) {
+            lines.push(`  tarea         ninguna; exención vigente: ${ctx.exemption.reason}`);
+          } else {
+            lines.push('  tarea         ninguna reclamada');
+          }
+          if (ctx.syncFailed) {
+            lines.push(`  ⚠ BLOQUEADO   sincronización pendiente de ${ctx.syncFailed.task_id ?? 's/id'}`);
+            lines.push(`                desde ${ctx.syncFailed.at} — ${ctx.syncFailed.reason}`);
+            lines.push(`                se destraba cerrando la tarea por MCP, o con \`release --force\``);
+            problems++;
+          }
+          break;
+        case 'excluded':
+          lines.push(`  estado        EXCLUIDO a propósito${comoSeResolvio}`);
+          lines.push(`  protocolo     NO se aplica acá — el usuario dijo que no${ctx.project?.excluded_reason ? `: ${ctx.project.excluded_reason}` : ''}`);
+          lines.push('  candado       abierto');
+          break;
+        case 'pending':
+          lines.push(`  estado        PENDIENTE de decisión${comoSeResolvio}`);
+          lines.push('  protocolo     NO se aplica todavía — nadie contestó si acá se generan tareas');
+          lines.push('  candado       abierto');
+          if (ctx.snoozed) lines.push(`  pospuesto     hasta ${ctx.project.snoozed_until}`);
+          lines.push('  → contestá:   `/clickup-setup` (sí) · `project exclude` (no) · `project snooze` (después)');
+          warnings++;
+          break;
+        default:
+          lines.push('  estado        SIN REGISTRAR');
+          lines.push('  protocolo     NO se aplica acá — esta carpeta no está en el registro global');
+          lines.push('  candado       abierto');
+          lines.push('  → si el trabajo de acá debería ir al tablero, corré `/clickup-setup`');
+          lines.push('    (si no, la herramienta va a preguntar sola en la primera escritura)');
+          warnings++;
+          break;
+      }
+    }
+    lines.push('');
+    lines.push('INSTALACIÓN');
+  }
 
   lines.push(`node            ${process.version}`);
   {
@@ -1271,7 +1901,7 @@ function cmdDoctor() {
   lines.push(`install dir     ${toolHome()}${fs.existsSync(toolHome()) ? '' : '  ← NO EXISTE'}`);
   if (!fs.existsSync(toolHome())) problems++;
 
-  const { config, ok, error, existed } = loadConfig();
+  const { config, ok, error, existed, normalised } = loadConfig();
   if (!existed) {
     lines.push(`config          ${configPath()}  ← NO EXISTE (¿corriste el instalador?)`);
     problems++;
@@ -1285,24 +1915,61 @@ function cmdDoctor() {
       `identidad       ${identityReady(config) ? `${config.identity.clickup_user_id} ok` : 'SIN RESOLVER ← no vas a poder asignar'}`,
     );
     if (!identityReady(config)) problems++;
+
+    // Punto 8 de la crítica: dos campos que se contradicen, y el sistema no lo notaba.
+    //
+    // `pending_query` es el dato que el instalador dejó para que la primera sesión resolviera la
+    // identidad por MCP. Una vez confirmada no significa nada — pero seguía ahí, y `doctor`
+    // imprimía "identidad ok" igual. `loadConfig` ahora lo corrige al leer y REPORTA lo que
+    // corrigió: arreglarlo en silencio lo dejaría invisible, que es la mitad de la queja.
+    for (const arreglo of normalised ?? []) {
+      lines.push(`                · contradicción corregida al leer: ${arreglo}`);
+      lines.push('                  (en memoria; el archivo se actualiza en la próxima escritura)');
+      warnings++;
+    }
+
+    // El equipo vacío no rompe nada visible, y ese es justamente el problema: el protocolo dice
+    // existir para que dos personas no trabajen lo mismo en paralelo, y sin el mapeo
+    // git-email → id de ClickUp no hay forma de saber que la tarea la tomó otro. La función
+    // declarada del sistema no tiene los datos que necesita para funcionar.
+    const equipo = Object.keys(config.team ?? {}).length;
+    if (equipo === 0) {
+      lines.push('equipo          VACÍO — la detección de colisiones entre personas NO puede funcionar');
+      lines.push('                Sin `git email → id de ClickUp` no hay forma de reconocer que una');
+      lines.push('                tarea la tomó otro. Cargá al menos a tus compañeros de lista:');
+      lines.push('                  clickup-flow team add --git-email <e> --clickup-id <id>');
+      warnings++;
+    } else {
+      const sinConfirmar = Object.values(config.team).filter((m) => !m?.confirmed).length;
+      lines.push(
+        `equipo          ${equipo} persona(s)${sinConfirmar ? `, ${sinConfirmar} sin confirmar` : ''}`,
+      );
+      if (sinConfirmar) warnings++;
+    }
     const projects = Object.entries(config.projects ?? {});
+    const activos = projects.filter(([, p]) => isActive(p)).length;
+    const excluidos = projects.filter(([, p]) => p.mode === MODES.EXCLUDED).length;
+    const pendientes = projects.filter(([, p]) => p.mode === MODES.PENDING).length;
     lines.push(
-      `proyectos       ${projects.length} (${projects.filter(([, p]) => p.mode === MODES.EXCLUDED).length} excluidos)`,
+      `proyectos       ${projects.length} · ${activos} activo(s), ${excluidos} excluido(s), ${pendientes} pendiente(s)`,
     );
     // A misconfigured umbrella project silently degrades into "creates loose tasks".
     for (const [key, p] of projects) {
+      // `isActive` en vez de `mode !== EXCLUDED`: un proyecto PENDIENTE todavía no tiene destino
+      // y no tenerlo es su estado correcto, no un problema que reportar.
+      if (p.mode === MODES.PENDING) continue;
       if (p.mode === MODES.UMBRELLA && !p.umbrella_task_id) {
         lines.push(`                ⚠ ${key}: modo umbrella SIN umbrella_task_id`);
         problems++;
       }
-      if (p.mode !== MODES.EXCLUDED && !p.list_id) {
+      if (isActive(p) && !p.list_id) {
         lines.push(`                ⚠ ${key}: sin list_id`);
         problems++;
       }
       // Un AVISO, no un problema: con un solo workspace el MCP lo resuelve solo, así que hoy
       // funciona igual. Pero es el dato que falta el día que la cuenta suma un segundo workspace
       // y las herramientas que lo piden explícito dejan de poder adivinar. Se ve, no bloquea.
-      if (p.mode !== MODES.EXCLUDED && !p.workspace_id && !config.defaults.workspace_id) {
+      if (isActive(p) && !p.workspace_id && !config.defaults.workspace_id) {
         lines.push(`                · ${key}: sin workspace_id (ni default global)`);
         warnings++;
       }
@@ -1312,7 +1979,7 @@ function cmdDoctor() {
       // las levantaría. Para un `frontend` es apenas informativo — nunca parkea, así que una
       // contraparte rota no le cambia el comportamiento. Reportar las dos igual sería `doctor`
       // gritando lobo, que es exactamente cómo se deja de leer.
-      if (p.mode !== MODES.EXCLUDED && p.counterpart) {
+      if (isActive(p) && p.counterpart) {
         const rb = roleBehaviour(p, config);
         if (rb.counterpartProblem && rb.role === ROLES.BACKEND) {
           lines.push(`                ⚠ ${key}:`);
@@ -1338,7 +2005,7 @@ function cmdDoctor() {
         }
       }
 
-      if (p.mode !== MODES.EXCLUDED && !p.statuses) {
+      if (isActive(p) && !p.statuses) {
         // A warning, not a problem: the fallback names are right for many boards, so this works
         // as-is. But when a space renames its statuses, this is the line that explains why every
         // update suddenly fails — so it stays visible.
@@ -1356,9 +2023,40 @@ function cmdDoctor() {
     problems++;
   } else {
     const installed = inspectInstalled(settings);
-    lines.push(`hooks           ${installed.length}/3 registrados en settings.json`);
-    for (const h of installed) lines.push(`                ${h.event}${h.matcher ? ` [${h.matcher}]` : ''}`);
-    if (installed.length !== 3) problems++;
+    lines.push(`hooks           ${installed.length}/${HOOK_COUNT} registrados en settings.json`);
+    for (const h of installed) {
+      const m = h.matcher ? ` [${h.matcher.length > 46 ? `${h.matcher.slice(0, 46)}…` : h.matcher}]` : '';
+      lines.push(`                ${h.event}${m}`);
+    }
+    if (installed.length !== HOOK_COUNT) {
+      problems++;
+      // Punto 9 de la crítica: escribimos en un archivo que el usuario y otras herramientas
+      // también editan, y no había reconciliación ante edición concurrente. No la hay todavía,
+      // pero al menos la DERIVA se detecta y se nombra en vez de pasar por instalación rota.
+      lines.push('                ← faltan hooks. Los pudo haber sacado una edición manual de');
+      lines.push('                  settings.json, otra herramienta, o una versión vieja del');
+      lines.push('                  instalador. Reinstalá para reconciliar: npm run install-tool');
+    }
+  }
+
+  // La línea que hace diagnosticable el peor modo de fallo de esta herramienta.
+  //
+  // Si el matcher del PostToolUse no coincide con los nombres de las herramientas del conector,
+  // TODO lo que dependa de la evidencia queda inerte — y sin esta línea, indistinguible de "el
+  // modelo no cerró sus tareas". Es la misma clase de bug que el punto 5 de la crítica: un
+  // diagnóstico que no puede reproducir el síntoma no es un diagnóstico.
+  {
+    const ev = evidenceHealth();
+    if (ev.everSeen) {
+      lines.push(`evidencia MCP   ${ev.count} mutación(es) registradas · última ${ev.lastSeenAt}`);
+    } else {
+      lines.push('evidencia MCP   NUNCA registró nada ← la obligación de cerrar está DESARMADA');
+      lines.push('                El hook PostToolUse no corrió ni una vez. Si ya usaste ClickUp');
+      lines.push('                por MCP en un proyecto registrado, el matcher no coincide con');
+      lines.push('                los nombres de las herramientas de tu conector.');
+      lines.push('                Se falla ABIERTO a propósito: nada se bloquea por esto.');
+      warnings++;
+    }
   }
 
   const states = listStateFiles();
@@ -1402,7 +2100,9 @@ Trabajo diario
   exempt --reason "<motivo>" [--hours N] | exempt --clear
 
 Configuración
-  project show | list | set | exclude | forget
+  project show | list | set | adopt | snooze | exclude | forget
+      adopt --like <ruta>         copia el destino de otro proyecto ya configurado
+      snooze [--days N]           pospone la pregunta de alta en esta carpeta
       set acepta, además de las coordenadas, overrides por proyecto:
       --use-dates --use-priorities --auto-assign --end-date-field --search-window-days
       y los nombres REALES de los estados del tablero:
@@ -1416,7 +2116,8 @@ Configuración
   doctor                      Verifica la instalación
 
 Hooks (los invoca el harness, no vos)
-  session-start | prompt-hook | guard
+  session-start | guard | sync-hook | stop-hook
+  prompt-hook                 obsoleto: ya no se instala, sale sin hacer nada
 `;
 
 async function main() {
@@ -1431,6 +2132,10 @@ async function main() {
       return cmdPromptHook();
     case 'guard':
       return cmdGuard();
+    case 'sync-hook':
+      return cmdSyncHook();
+    case 'stop-hook':
+      return cmdStopHook();
     case 'context':
       return cmdContext(args);
     case 'status':
@@ -1452,7 +2157,7 @@ async function main() {
     case 'migrate':
       return cmdMigrate(args);
     case 'doctor':
-      return cmdDoctor();
+      return cmdDoctor(args);
     case 'help':
     case '--help':
     case '-h':
@@ -1469,7 +2174,7 @@ async function main() {
 // The catch-all is what makes the golden rule true. A hook that throws would surface as a broken
 // turn in an unrelated repository, so hooks always resolve to a silent 0 and only real commands
 // are allowed to report a failure.
-const HOOKS = new Set(['session-start', 'prompt-hook', 'guard']);
+const HOOKS = new Set(['session-start', 'prompt-hook', 'guard', 'sync-hook', 'stop-hook']);
 main()
   .then((code) => process.exit(typeof code === 'number' ? code : 0))
   .catch((error) => {

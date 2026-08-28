@@ -13,14 +13,18 @@
 import {
   MODES,
   identityReady,
+  isActive,
+  formatListPath,
   resolveProject,
+  snoozeActive,
+  suggestFromOrg,
   gitEmail,
   effectiveDefaults,
   effectiveStatuses,
   roleBehaviour,
 } from './config.mjs';
 import { cliInvocation } from './paths.mjs';
-import { readState, exemptionStatus } from './state.mjs';
+import { readState, exemptionStatus, claimVerified, evidenceHealth } from './state.mjs';
 
 const TASK_URL = (id) => `https://app.clickup.com/t/${id}`;
 
@@ -43,26 +47,50 @@ function daysAgo(days) {
  * Pure data — the markdown rendering is separate so hooks can use the facts without the prose.
  */
 export function buildContext(config, cwd) {
-  const { key, entry, matchedBy, matchedKey } = resolveProject(config, cwd);
+  const { key, entry, matchedBy, matchedKey, status } = resolveProject(config, cwd);
   let gitEmailCache;
+  let orgCache;
+  let evidenceCache;
   const state = readState(matchedKey || key);
   // Project overrides win over the global defaults — see OVERRIDABLE in config.mjs for why.
   const defaults = effectiveDefaults(config, entry);
   const exemption = exemptionStatus(state, defaults.exemption_hours ?? 8);
 
   return {
+    // Proyectos ya registrados que comparten la organización del remote. Perezoso: resolverlo
+    // cuesta un `git remote get-url`, y los hooks que corren siempre no lo necesitan nunca.
+    get orgSuggestions() {
+      if (orgCache === undefined) orgCache = suggestFromOrg(config, cwd);
+      return orgCache;
+    },
     cwd: key,
     project: entry,
     matchedBy,
     matchedKey,
-    registered: Boolean(entry),
-    excluded: entry?.mode === MODES.EXCLUDED,
+    // 'unknown' | 'pending' | 'excluded' | 'active'. La rama sobre la que decide todo hook.
+    status,
+    // `registered` sigue significando lo MISMO que siempre: el protocolo se aplica acá. Un
+    // proyecto `pending` tiene entrada en el config pero no está registrado en este sentido, y
+    // confundir las dos cosas volvería a fusionar los estados que este cambio vino a separar.
+    registered: isActive(entry),
+    pending: status === 'pending',
+    excluded: status === 'excluded',
+    snoozed: snoozeActive(entry),
     mode: entry?.mode ?? null,
     identity: config.identity || {},
     identityReady: identityReady(config),
     defaults,
     team: config.team || {},
     claim: state.claim,
+    // El claim está verificado solo si el harness vio la mutación MCP. Ver `recordMcpWrite`.
+    claimVerified: claimVerified(state),
+    // Salud del mecanismo de evidencia. Perezoso: solo lo miran `stop-hook`, `release` y
+    // `doctor`, y es un `readFileSync` que el guard no tiene por qué pagar en cada Bash.
+    get evidence() {
+      if (evidenceCache === undefined) evidenceCache = evidenceHealth();
+      return evidenceCache;
+    },
+    syncFailed: state.sync_failed ?? null,
     exemption,
     // Lazy on purpose: the hooks that fire every turn never read this, and spawning git for a
     // value nobody asked for is a tax paid on every prompt in every repo on the machine.
@@ -83,8 +111,9 @@ export function buildContext(config, cwd) {
 
 /** The one-line summary the SessionStart hook prints. */
 export function shortSummary(ctx) {
-  if (!ctx.registered) return 'proyecto sin configurar';
   if (ctx.excluded) return 'proyecto excluido';
+  if (ctx.pending) return 'proyecto pendiente de decisión';
+  if (!ctx.registered) return 'proyecto sin configurar';
   const p = ctx.project;
   const where = p.mode === MODES.UMBRELLA ? `paraguas ${p.umbrella_task_id}` : `lista ${p.list_id}`;
   return `${p.mode} · ${p.space_name ?? p.space_id} · ${where}`;
@@ -92,8 +121,9 @@ export function shortSummary(ctx) {
 
 /** The full brief, as markdown, for the agent to read before touching the board. */
 export function renderContext(ctx) {
-  if (!ctx.registered) return renderUnregistered(ctx);
   if (ctx.excluded) return renderExcluded(ctx);
+  if (ctx.pending) return renderPending(ctx);
+  if (!ctx.registered) return renderUnregistered(ctx);
 
   const p = ctx.project;
   const d = ctx.defaults;
@@ -995,6 +1025,56 @@ function renderUnregistered(ctx) {
     'Crear tareas en el espacio equivocado de un tablero compartido es más difícil de deshacer',
     'que preguntar.',
   ].join('\n');
+}
+
+/**
+ * Un proyecto que vimos y sobre el que todavía no hay respuesta.
+ *
+ * Se distingue del `unregistered` en una cosa que importa: acá SÍ hay una pregunta abierta, y el
+ * texto tiene que dar los tres comandos exactos para cerrarla. La versión anterior decía
+ * "ofrecele al usuario correr /clickup-setup" y confiaba en que el modelo lo hiciera — que es
+ * precisamente lo que no pasó.
+ */
+function renderPending(ctx) {
+  const p = ctx.project;
+  const sug = ctx.orgSuggestions;
+  const out = [
+    '# ClickUp — este proyecto tiene una decisión PENDIENTE',
+    '',
+    `Directorio: \`${ctx.cwd}\``,
+    p?.first_seen ? `Visto por primera vez: ${p.first_seen}` : null,
+    ctx.snoozed ? `Pospuesto hasta: ${p.snoozed_until}` : null,
+    '',
+    'La herramienta ya conoce esta carpeta pero **nadie decidió todavía si acá se generan tareas**.',
+    'Mientras siga pendiente, el protocolo no aplica y el candado de escritura está abierto.',
+    '',
+    '**Preguntale al usuario y registrá la respuesta.** No decidas vos, y no sigas sin respuesta',
+    'inventando coordenadas: crear tareas en el espacio equivocado de un tablero compartido es',
+    'más difícil de deshacer que preguntar.',
+    '',
+  ];
+
+  if (sug.length) {
+    const { key, entry, org } = sug[0];
+    out.push(
+      `Dato útil: este repo pertenece a **${org}**, igual que \`${key}\`, que ya está configurado`,
+      `y apunta a **${formatListPath(entry)}**. Si el usuario confirma que va al mismo lugar:`,
+      '',
+      `    ${ctx.cli} project adopt --like "${key}"`,
+      '',
+    );
+  }
+
+  out.push(
+    'Los tres caminos, según lo que conteste el usuario:',
+    '',
+    `1. **Sí, acá se gestionan tareas** → \`/clickup-setup\` (pregunta la lista destino y el modo).`,
+    `2. **No, este proyecto no usa ClickUp** → \`${ctx.cli} project exclude --reason "<motivo>"\``,
+    `3. **Ahora no, después vemos** → \`${ctx.cli} project snooze\``,
+  );
+
+  // Se filtra `null`, NO el string vacío: las líneas vacías son los párrafos del markdown.
+  return out.filter((l) => l !== null).join('\n');
 }
 
 function renderExcluded(ctx) {
