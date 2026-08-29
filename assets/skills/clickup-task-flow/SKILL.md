@@ -41,6 +41,12 @@ Antes de invocarlas hay que traer su esquema:
 ToolSearch(query: "select:clickup_filter_tasks,clickup_search,clickup_get_task,clickup_get_task_comments,clickup_create_task,clickup_update_task,clickup_create_comment,clickup_resolve_assignees,clickup_get_workspace_members")
 ```
 
+Y solo si `context` dice que este proyecto **registra tiempo**, además:
+
+```
+ToolSearch(query: "select:clickup_start_time_tracking,clickup_stop_time_tracking,clickup_get_current_time_entry,clickup_add_time_entry")
+```
+
 ## Si ClickUp no responde, se PARA. No se asume que está libre
 
 El conector MCP es **por cuenta de cada persona**, no del repositorio: que funcione en una máquina
@@ -136,6 +142,51 @@ Para asignarle trabajo a **otra** persona hace falta su mapeo, con el mismo crit
 ```
 
 Sin `--confirmed`, la entrada queda marcada como deducida y **no se asigna con ella sin preguntar**.
+
+## El cronómetro: solo si el proyecto lo pide, y solo si las horas son tuyas
+
+Algunos proyectos registran el tiempo trabajado. `context` te dice si este es uno de ellos e
+imprime las llamadas exactas; si no lo dice, **no arranques ningún cronómetro**.
+
+Y hay un límite de la API que hay que entender antes de tocarlo:
+
+> **Las herramientas de tiempo no reciben a quién se le carga la hora.**
+> `clickup_start_time_tracking` y `clickup_add_time_entry` registran **siempre a nombre del dueño
+> del token OAuth**, no de quien ejecuta.
+
+Es el mismo agujero que hace que `"me"` esté prohibido para asignar, pero sobre horas — y las
+horas, en muchos equipos, son lo que se factura. Si el token no es el tuyo, cada hora que
+registres se le carga a otra persona: la llamada no falla, no avisa, y se descubre semanas
+después mirando un reporte.
+
+Por eso el cronómetro **no arranca hasta que se verifique de quién es el token**, una sola vez. Y
+esto no depende de que vos te acuerdes: un hook `PreToolUse` **cancela** la llamada. Si te frena,
+no busques cómo rodearlo — no hay parámetro que arregle esto.
+
+```
+1. clickup_resolve_assignees(["me"])   → el id del DUEÑO DEL TOKEN
+```
+```bash
+2. {{CLI}} timer verify --user-id <ese id>
+```
+
+Si no coincide con tu id, el cronómetro queda desactivado a propósito y hay que **decírselo al
+usuario**: para registrar tiempo tiene que conectar su propia cuenta de ClickUp en claude.ai, o
+cargar las horas desde la app.
+
+Con la atribución verificada, el reloj **sigue al claim**: arranca cuando reclamás y para antes de
+cerrar. Tres reglas que no cambian:
+
+- **Un solo reloj corriendo por persona.** Arrancar uno con otro andando **falla**. No reintentes:
+  preguntá, porque parar el anterior cierra la entrada de tiempo de otro trabajo.
+- **Se para ANTES de cerrar la tarea**, no después. Por eso `{{CLI}} release` se niega a soltar el
+  claim con el reloj corriendo: un cronómetro olvidado sobre una tarea ya cerrada suma horas toda
+  la noche y nadie las corrige.
+- **Si te retirás a mitad, el reloj se para igual.** `on hold` con el reloj andando es la misma
+  trampa, disimulada por días.
+
+Para tiempo trabajado fuera de una sesión, no inventes un arranque retroactivo: `clickup_add_time_entry`
+con `start` + `duration`.
 
 ## Paso 2 — Buscar ANTES de crear, siempre
 
@@ -284,7 +335,7 @@ elección (el motivo de una exención, el texto de un comentario) preguntá norm
 
 ## Esto no depende de que vos te acuerdes
 
-Tres hooks los ejecuta **el harness, no el modelo**. Ninguno se puede olvidar, diluir en una
+Cinco hooks los ejecuta **el harness, no el modelo**. Ninguno se puede olvidar, diluir en una
 compactación, ni omitir por conveniencia.
 
 **1. `PreToolUse` — no se escribe sin tarea.**
@@ -299,16 +350,30 @@ Cada llamada de escritura al MCP de ClickUp queda registrada leyendo el **result
 herramienta. Un claim no está verificado porque lo digas: está verificado porque el harness vio
 la mutación. Por eso `release` rechaza soltar una tarea sobre la que no hay ninguna.
 
-**3. `Stop` — no se cierra el turno dejando el tablero desactualizado.**
+**3. `PreToolUse` del tiempo — no se cargan horas a nombre de otro.**
+Cancela `clickup_start_time_tracking` y `clickup_add_time_entry` mientras no esté probado que el
+dueño del token sos vos. **No es una regla del protocolo que puedas evaluar: la ejecuta el
+harness.** Y `clickup_stop_time_tracking` **nunca** se bloquea — parar un reloj no puede hacer
+daño, y un candado que te impide apagarlo es un candado que te encierra adentro.
+
+**4. `PostToolUse` del cronómetro — saber si quedó un reloj corriendo.**
+Va en un matcher aparte del anterior, y no es orden: arrancar un reloj **no** cuenta como
+evidencia de que el trabajo quedó registrado. Si contara, alcanzaría con prender el cronómetro
+para abrir el candado de escritura sin comentar ni cerrar nada. Este registro contesta una sola
+pregunta —¿hay algo corriendo?— y con eso `release` frena y `SessionStart` avisa.
+
+**5. `Stop` — no se cierra el turno dejando el tablero desactualizado.**
 Si hay una tarea reclamada y ninguna mutación registrada para ella, el turno **no puede
 terminar**. Después de dos avisos suelta —un hook que bloquea para siempre cuelga la sesión— pero
 deja `sync_failed` escrito, y entonces el candado de escritura no vuelve a abrirse en ese proyecto
 hasta reconciliar. El fallo no se pierde: se traslada.
 
-Los hooks 2 y 3 **se arman solos**: mientras el `PostToolUse` no haya corrido ni una vez en esta
-instalación, no se exige nada y se falla abierto. La razón es simple — si el matcher no coincide
-con el nombre de las herramientas de tu conector, exigir evidencia trabaría el proyecto acusándote
-de algo que hiciste bien. `clickup-flow doctor` dice si está armada o no.
+Los hooks 2, 4 y 5 **se arman solos**: mientras el `PostToolUse` que les corresponde no haya
+corrido ni una vez en esta instalación, no se exige nada y se falla abierto. La razón es simple —
+si el matcher no coincide con el nombre de las herramientas de tu conector, exigir evidencia
+trabaría el proyecto acusándote de algo que hiciste bien. Cada matcher lleva su propia cuenta, por
+la misma razón: un conector puede registrar bien las escrituras y haber renombrado las de tiempo.
+`clickup-flow doctor` dice cuáles están armados.
 
 **Lo que sigue dependiendo de vos, dicho sin adornos:** el CLI **no puede escribir en ClickUp**.
 El conector es OAuth de claude.ai, no hay token en disco, y ningún proceso fuera de una sesión de

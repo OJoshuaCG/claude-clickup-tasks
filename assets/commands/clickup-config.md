@@ -81,12 +81,31 @@ nadie lo validó.
 | `auto_assign` | Asignar automáticamente al usuario configurado |
 | `end_date_field` | **Dónde va la fecha de fin** — ver abajo, importa |
 | `search_window_days` | Cuántos días hacia atrás se buscan las tareas **cerradas**. `0` = sin límite |
+| `track_time` | Usar el cronómetro de ClickUp. **Apagado por default** — ver abajo |
 | `block_writes_without_task` | El candado `PreToolUse` |
 | `exemption_hours` | Cuánto dura una exención antes de vencer |
 
 ```bash
 {{CLI}} config set --key defaults.<campo> --value <valor>
 ```
+
+### `track_time` — por qué viene apagado, y por qué puede quedar bloqueado
+
+Encendido, el cronómetro sigue al claim: arranca al reclamar y para antes de cerrar. Se activa por
+proyecto (`project set --track-time true`), no global: en un mismo equipo conviven el repo que se
+factura por hora y la herramienta interna donde registrar tiempo es puro ruido.
+
+Pero encenderlo **no alcanza**. Las herramientas de tiempo del MCP no reciben a quién se le carga
+la hora: el reloj corre siempre a nombre del **dueño del token OAuth**. Si ese no es el usuario,
+sus horas se le cargan a otra persona sin que nada falle. Por eso hace falta verificarlo una vez:
+
+```bash
+{{CLI}} timer status                      # ¿en qué estado está?
+{{CLI}} timer verify --user-id <id>       # el id que devuelve clickup_resolve_assignees(["me"])
+```
+
+Si el id del token no coincide con el id confirmado del usuario, el cronómetro queda desactivado a
+propósito y no hay flag para saltearlo.
 
 ### `end_date_field` — la decisión con consecuencias
 

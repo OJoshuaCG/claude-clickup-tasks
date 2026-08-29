@@ -72,7 +72,11 @@ carrera**, y registrá el claim:
 {{CLI}} claim --task-id <id> --title "<título>"
 ```
 
-**7. Recién ahora** empezá a trabajar. Confirmale al usuario que quedó reservada, con el id y la URL.
+**7. Si `context` dice que este proyecto registra tiempo**, arrancá el cronómetro con la llamada
+que imprime. Si dice que la atribución está sin resolver, **no lo arranques** y contale al usuario
+por qué: el reloj corre a nombre del dueño del token, no del que ejecuta.
+
+**8. Recién ahora** empezá a trabajar. Confirmale al usuario que quedó reservada, con el id y la URL.
 
 ---
 
@@ -80,6 +84,8 @@ carrera**, y registrá el claim:
 
 1. Traé la tarea y verificá que esté en `in progress`. Si está en otro estado, **decilo** en vez de
    forzar: cerrar algo que nadie reclamó suele significar que se salteó el paso de reclamar.
+   **Si hay un cronómetro corriendo, paralo ACÁ**, antes de tocar el estado — `release` no va a
+   dejar soltar el claim con el reloj andando, y por buenos motivos.
 2. Si el proyecto tiene handoff, **la pregunta obligatoria**: ¿esto necesita trabajo del otro rol?
    No alcanza con que *vos* no lo hayas tocado — hay que poder afirmar que **nada de lo que el otro
    lado ya consume cambió** (rutas, forma de la respuesta, códigos de error, campos obligatorios).
@@ -106,6 +112,7 @@ decir cuál la dejaría bloqueada a mitad del trabajo. Con el id, el comando se 
 
 `status: "on hold"` + comentario que diga **dónde quedó** y qué falta. **Ninguna fecha de fin**: la
 tarea no terminó. Los asignados **no se tocan** — quien la dejó a medias es quien sabe dónde quedó.
+**El cronómetro se para igual**: una tarea pausada con el reloj andando suma horas por días.
 
 Después, `{{CLI}} release --task-id <id>`.
 
@@ -247,6 +254,8 @@ Es un tablero compartido y puede ser grande: agrupá y no vuelques cien tareas.
 - **La identidad de los comentarios es el EMAIL**, dentro del texto. Para asignar, el **id numérico**.
   **`"me"` está prohibido**: resuelve al dueño del token y le asigna todo a la misma persona.
 - **`assignees` se lee, se une y se escribe.** Mandar solo tu id borra a los demás en silencio.
+- **El cronómetro corre a nombre del dueño del token**, no del que ejecuta, y las herramientas de
+  tiempo no reciben asignado. Sin `timer verify` no se arranca ninguno.
 - **Re-verificar después de reclamar y después de crear.** La colisión no se previene, se detecta.
 - **Si ClickUp falla, se para.** Un error del conector nunca significa "está libre".
 - **Nada de credenciales, `.env` ni datos de clientes** en comentarios ni adjuntos.

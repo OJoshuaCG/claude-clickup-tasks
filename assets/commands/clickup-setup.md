@@ -241,11 +241,11 @@ el protocolo va a decir que se pregunte antes de asumir. No les inventes un sign
 
 ---
 
-## Paso 3 — Modo, rol y títulos: UNA sola llamada
+## Paso 3 — Modo, rol, títulos y tiempo: UNA sola llamada
 
-Estas tres decisiones se preguntan **juntas**, en una única `AskUserQuestion` con tres preguntas.
-Son independientes entre sí y ninguna depende de la respuesta de la otra, así que partirlas en tres
-idas y vueltas es fricción sin ganancia.
+Estas cuatro decisiones se preguntan **juntas**, en una única `AskUserQuestion` con cuatro
+preguntas —el máximo que acepta la herramienta—. Son independientes entre sí y ninguna depende de
+la respuesta de la otra, así que partirlas en cuatro idas y vueltas es fricción sin ganancia.
 
 **Pregunta 1 — `header: "Modo"`.** Es la que cambia cómo se ve el tablero:
 
@@ -276,7 +276,19 @@ que esperan a nadie:
 >   compara por id en vez de por texto. **Solo tiene sentido si tu equipo ya lo usa**: meter un
 >   esquema nuevo entre las tareas de los demás es cambiarles la convención sin avisarles.
 
-### Las dos preguntas de seguimiento
+**Pregunta 4 — `header: "Tiempo"`.**
+
+> **¿Se registra en ClickUp el tiempo trabajado?**
+>
+> - **No** — no se toca el cronómetro. **Default.**
+> - **Sí, con el cronómetro** — el reloj arranca al reclamar la tarea y para antes de cerrarla, y
+>   `release` no deja soltar el claim con el reloj corriendo.
+
+**El default es "no" a propósito.** Encenderlo escribe entradas de tiempo en un tablero
+compartido, que en muchos equipos son las horas que se facturan. Una herramienta que empieza a
+cargar horas que nadie pidió se desinstala esa misma tarde.
+
+### Las preguntas de seguimiento
 
 Van **después**, y solo si la respuesta anterior las hace necesarias. Ninguna se adelanta.
 
@@ -294,6 +306,23 @@ mal apuntado hace que todas las subtareas caigan en otro lado.
 proyectos ya registrados como opciones, más "ninguno":
 
 > **¿Hay otro proyecto que sea su contraparte?**
+
+**Si eligió registrar tiempo:** verificá **de quién es el token del conector**, ahora y no después.
+Las herramientas de tiempo del MCP no reciben a quién se le carga la hora: el reloj corre siempre
+a nombre del dueño del token OAuth. Si ese no es el usuario, todo su tiempo se le carga a otra
+persona sin que nada falle.
+
+```
+1. clickup_resolve_assignees(["me"])   → el id del DUEÑO DEL TOKEN
+```
+```bash
+2. {{CLI}} timer verify --user-id <ese id>
+```
+
+Si el comando **falla**, el token es de otra cuenta: decíselo al usuario con todas las letras —el
+cronómetro queda desactivado y hay que conectar su propia cuenta de ClickUp en claude.ai, o cargar
+las horas desde la app—. **Guardá igual el resto del setup**: el proyecto queda configurado y el
+cronómetro simplemente no se ofrece hasta que se resuelva.
 
 Con eso el protocolo se deriva solo:
 
@@ -357,7 +386,12 @@ default global — un flag omitido sigue heredando el global, que es lo que quer
 --use-dates true|false
 --use-priorities true|false
 --auto-assign true|false
+--track-time true|false
 ```
+
+`--track-time` es la respuesta de la pregunta 4, y va **por proyecto**: en un mismo equipo conviven
+el repo del cliente que se factura por hora y la herramienta interna donde registrar tiempo es
+puro ruido.
 
 El que más importa es `--end-date-field`. **Si el equipo ya usa `due_date` como fecha de fin en
 ese tablero, pasalo explícitamente**; y si lo usa como **fecha límite**, no lo pases — escribir ahí

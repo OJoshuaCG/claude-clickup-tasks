@@ -110,7 +110,7 @@ Detalles que Windows obliga a manejar y están cubiertos por tests:
 │   └── backups/
 ├── skills/clickup-task-flow/  ← nuevo
 ├── commands/                  ← nuevo: tarea.md, clickup-setup.md, clickup-config.md
-└── settings.json              ← MODIFICADO: se agregan 4 hooks y permisos de lectura
+└── settings.json              ← MODIFICADO: se agregan 6 hooks y permisos de lectura
 ```
 
 **`settings.json` se modifica por unión, nunca por reemplazo.** Se hace un backup con timestamp
@@ -144,6 +144,7 @@ directorio `test/`, así que agregar uno no requiere acordarse de anotarlo en ni
 | `esquema` | 90 combinaciones de tipo equivocado + 192 combinaciones del protocolo |
 | `idempotencia` | Cada comando tres veces, y los 14 caminos de error uno por uno |
 | `instrucciones` | Que el skill y los comandos no pierdan sus reglas, y coincidan con la API |
+| `cronometro` | Atribución de las horas, evidencia del reloj y el candado de cierre |
 
 ---
 
@@ -195,7 +196,7 @@ esa evidencia en la mano, el hook `Stop` puede negarse a cerrar el turno.
 > El modelo sigue siendo el único que puede escribir en ClickUp.
 > Deja de ser el único que sabe si escribió.
 
-### Los cuatro hooks
+### Los seis hooks
 
 Los ejecuta **el harness de Claude Code, no el modelo**. Esa distinción es el punto: una
 instrucción se puede olvidar o diluir cuando el contexto se comprime en una sesión larga; un hook
@@ -206,6 +207,8 @@ no.
 | `SessionStart` | Al abrir sesión y **al compactar** | Anuncia a qué lista de ClickUp está atado el proyecto, o que no tiene ninguna |
 | `PreToolUse` | Antes de `Edit`/`Write`/`MultiEdit`/`NotebookEdit`/**`Bash`** | **Cancela la escritura** si no hay tarea reclamada ni exención. En un proyecto nuevo, **pregunta una vez** si entra al flujo |
 | `PostToolUse` | Después de cada escritura MCP a ClickUp | Registra la mutación **real**, leyendo el resultado de la herramienta |
+| `PreToolUse` | Antes de **arrancar o cargar** tiempo | **Cancela la llamada** si no está probado que el token es de quien ejecuta. Parar el reloj nunca se bloquea |
+| `PostToolUse` | Después de cada llamada al **cronómetro** | Sabe si quedó un reloj corriendo, y sobre qué tarea |
 | `Stop` | Al querer terminar el turno | **No deja cerrar** con una tarea reclamada y sin ninguna mutación registrada |
 
 `Bash` está en el matcher del candado a propósito: sin él, `cat > archivo <<EOF`, `sed -i`, `tee`,
@@ -452,6 +455,8 @@ otra persona descubra el trabajo duplicado en el merge.
 | `/tarea estado` | Qué está en curso, quién lo tiene, qué está libre, y colisiones ya ocurridas |
 | `/tarea handoff` | Lo que espera trabajo del otro rol |
 | `/tarea bloqueos` | Las `on hold` con un pedido concreto adentro — no salen en ningún filtro habitual |
+| `clickup-flow timer status` | ¿Hay un reloj corriendo, y las horas van a tu nombre? |
+| `clickup-flow timer verify --user-id <id>` | Registra de quién es el token. **Sin esto el cronómetro no arranca** |
 | `/clickup-setup` | Configura (o excluye, o reactiva) **este** proyecto |
 | `/clickup-config` | Identidad, preferencias globales, proyectos registrados, diagnóstico |
 
@@ -487,6 +492,43 @@ dos identidades y cada una tiene su uso:
 
 La identidad va **dentro del texto** del comentario porque todos los comentarios se publican con
 la cuenta del token: el campo "autor" de ClickUp es inútil para detectar colisiones.
+
+### 1 bis. El cronómetro tiene el MISMO agujero, y encima sobre horas facturables
+
+Cuando se agregó el registro de tiempo apareció exactamente el mismo problema, en un lugar donde
+duele más. Las herramientas de tiempo del MCP —`clickup_start_time_tracking`,
+`clickup_add_time_entry`— **no reciben un parámetro de asignado.** No es que esté desaconsejado
+como `"me"`: no existe. El reloj corre **siempre a nombre del dueño del token OAuth**.
+
+Si ese dueño no es quien ejecuta, todo el tiempo del equipo se le carga a una sola persona. La
+llamada devuelve éxito, no hay error que revisar, y se descubre cuando alguien mira el reporte de
+horas del mes.
+
+**Resolución:** el cronómetro **no arranca hasta que se verifique de quién es el token**, y la
+verificación usa la misma trampa que causaba el bug original — `clickup_resolve_assignees(["me"])`
+devuelve el dueño del token, que es justo el dato que hace falta:
+
+```bash
+clickup-flow timer verify --user-id <lo que devolvió "me">
+```
+
+Si no coincide con tu id confirmado, el protocolo deja de ofrecer el cronómetro **y un hook
+`PreToolUse` cancela la llamada si el modelo la intenta igual**. Esa segunda mitad es la que
+importa: explicar no es impedir, y acá el daño es en los datos de otra persona. Tres estados
+posibles, los tres cerrados: identidad sin resolver, token sin verificar, token ajeno.
+
+La única herramienta de tiempo que **nunca** se bloquea es `clickup_stop_time_tracking`. Parar un
+reloj no puede hacer daño, y es justo lo que hay que poder hacer cuando algo salió mal: un candado
+que te impide apagar el reloj es un candado que te encierra adentro.
+
+Además, `track_time` viene **apagado por default**. Encenderlo escribe entradas de tiempo en un
+tablero compartido; una herramienta que empieza a cargar horas que nadie pidió se desinstala esa
+misma tarde.
+
+Y el registro del cronómetro va en un **hook aparte** del de las mutaciones, con su propio matcher
+y su propio archivo de salud. Si compartieran registro, prender el reloj contaría como evidencia
+de que el trabajo quedó anotado en la tarea — y entonces se podría reclamar, prender el reloj,
+escribir código y soltar el claim sin haber comentado ni cerrado nada. El candado se abriría solo.
 
 ### 2. `assignees` se lee, se une y se escribe
 
@@ -685,10 +727,10 @@ si viene de un override del proyecto.
 
 ### Overrides por proyecto
 
-Estos cinco campos se pueden definir por proyecto, y ganan sobre el default global:
+Estos seis campos se pueden definir por proyecto, y ganan sobre el default global:
 
 ```
-use_dates · use_priorities · auto_assign · end_date_field · search_window_days
+use_dates · use_priorities · auto_assign · end_date_field · search_window_days · track_time
 ```
 
 ```bash
