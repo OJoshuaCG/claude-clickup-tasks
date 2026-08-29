@@ -40,6 +40,7 @@ import {
   saveConfig,
   upsertProject,
   identityReady,
+  timeTrackingReady,
   isActive,
   markPending,
   rememberGitEmail,
@@ -58,6 +59,11 @@ import {
   recordMcpWrite,
   markEvidenceSeen,
   evidenceHealth,
+  recordTimerEvent,
+  markTimerSeen,
+  timerHealth,
+  timerStatus,
+  clearTimer,
   hasMcpEvidence,
   setSyncFailed,
   clearSyncFailed,
@@ -65,7 +71,7 @@ import {
   resetStopBlocks,
 } from './lib/state.mjs';
 import { buildContext, renderContext, shortSummary } from './lib/protocol.mjs';
-import { readSettings, inspectInstalled, HOOK_COUNT } from './lib/settings.mjs';
+import { readSettings, inspectInstalled, HOOK_COUNT, MCP_TIME_TOOLS } from './lib/settings.mjs';
 import { scanProject, importUsers } from './lib/migrate.mjs';
 
 // ---------------------------------------------------------------------------------------------
@@ -225,6 +231,20 @@ async function cmdSessionStart() {
       'FALTA RESOLVER LA IDENTIDAD DE CLICKUP: no asignes tareas hasta hacerlo. Buscá el miembro ' +
         `con clickup_get_workspace_members${ctx.identity.pending_query ? ` (dato del install: "${ctx.identity.pending_query}")` : ''}, ` +
         'confirmalo CON EL USUARIO y guardalo con `clickup-flow identity set --id <id> --confirmed`.',
+    );
+  }
+
+  // Un cronómetro olvidado se descubre acá o no se descubre nunca.
+  //
+  // Es el aviso más valioso de toda la función y por eso va antes que el claim: el reloj que
+  // quedó corriendo anoche se ve a la mañana siguiente, al abrir la sesión, y en ningún otro
+  // momento. Se dice siempre que haya uno andando, aunque el proyecto ya no registre tiempo —
+  // apagar la preferencia no apaga un reloj que ya está corriendo en el tablero.
+  if (ctx.timer.running) {
+    lines.push(
+      `⏱ CRONÓMETRO CORRIENDO sobre ${ctx.timer.taskId ?? 's/id'} desde hace ` +
+        `${ctx.timer.hours.toFixed(1)}h (arrancó ${ctx.timer.startedAt}). Si eso NO es trabajo ` +
+        'real en curso, paralo ya con `clickup_stop_time_tracking` y decíselo al usuario.',
     );
   }
 
@@ -695,6 +715,175 @@ async function cmdSyncHook() {
 }
 
 // ---------------------------------------------------------------------------------------------
+// Hook: PreToolUse — el cronómetro no arranca a nombre de otro
+// ---------------------------------------------------------------------------------------------
+
+/**
+ * Cancela la CARGA de tiempo cuando no está probado que las horas sean de quien ejecuta.
+ *
+ * POR QUÉ ESTO ES UN HOOK Y NO UN PÁRRAFO EN EL PROTOCOLO.
+ *
+ * Toda la premisa de este repo es que una instrucción se puede olvidar, diluir en una
+ * compactación u omitir por conveniencia, y que por eso las garantías las ejecuta el harness. El
+ * protocolo ya explica que el reloj corre a nombre del dueño del token — pero explicar no es
+ * impedir, y acá el daño es en los datos de otra persona: horas cargadas a un compañero, sin
+ * error, descubiertas semanas después en un reporte de facturación. Es exactamente la clase de
+ * fallo silencioso que motivó el resto de esta herramienta.
+ *
+ * DOS DECISIONES QUE HACEN QUE ESTO NO SEA UNA TRAMPA:
+ *
+ * 1. `clickup_stop_time_tracking` NUNCA se bloquea. Parar un reloj no puede hacer daño, y es lo
+ *    que uno necesita poder hacer siempre — sobre todo cuando algo salió mal. Un candado que te
+ *    impide apagar el reloj es un candado que te encierra adentro.
+ *
+ * 2. No depende de `track_time`. Esa preferencia dice si ESTE proyecto lleva tiempo; la
+ *    atribución dice a QUIÉN se le carga la hora. Un pedido ad-hoc ("cargá dos horas acá") hace
+ *    el mismo daño en un repo que no registra tiempo, así que el candado es global.
+ */
+async function cmdTimerGuard() {
+  const payload = await readHookInput();
+  const { config, ok } = loadConfig();
+  if (!ok) return 0; // config ilegible → nunca bloquea, como todos los demás
+
+  const corto = String(payload?.tool_name ?? '').split('__').pop();
+  // Parar siempre se puede. Ver la decisión 1 del comentario de arriba.
+  if (corto !== 'clickup_start_time_tracking' && corto !== 'clickup_add_time_entry') return 0;
+
+  const verdict = timeTrackingReady(config);
+  if (verdict.ok) return 0;
+
+  const que =
+    corto === 'clickup_add_time_entry' ? 'cargar tiempo' : 'arrancar el cronómetro';
+  // Sin repetir el porqué: `explicarAtribucion` ya lo dice, adaptado al caso. Un bloqueo que
+  // explica lo mismo dos veces es un bloqueo que se lee en diagonal.
+  err(
+    [
+      `BLOQUEADO: no se puede ${que} sin saber a quién se le cargan las horas.`,
+      '',
+      explicarAtribucion(config, verdict),
+      '',
+      'Esto NO se resuelve reintentando ni cambiándole los parámetros a la llamada: la',
+      'herramienta no tiene forma de decir a quién asignarle la hora. Contale al usuario qué',
+      'falta y esperá.',
+    ].join('\n'),
+  );
+  return 2;
+}
+
+// ---------------------------------------------------------------------------------------------
+// Hook: PostToolUse — el cronómetro
+// ---------------------------------------------------------------------------------------------
+
+/** `JSON.stringify` que no explota con ciclos ni con respuestas absurdamente grandes. */
+function textoDeRespuesta(valor) {
+  if (valor == null) return '';
+  if (typeof valor === 'string') return valor.slice(0, 500_000);
+  try {
+    return JSON.stringify(valor).slice(0, 500_000);
+  } catch {
+    return '';
+  }
+}
+
+/**
+ * ¿La llamada de cronómetro que acaba de pasar SUCEDIÓ, y sobre qué tarea?
+ *
+ * ACÁ ESTÁ EL ERROR QUE ESTA FUNCIÓN EVITA, y vale explicarlo porque no es obvio.
+ *
+ * La tentación es sacar el id de `tool_input.task_id` y listo: está siempre, es exacto, y es lo
+ * que hace el hook de las mutaciones. Pero el cronómetro tiene una condición de fallo que las
+ * otras herramientas no tienen: **ClickUp permite UN solo reloj corriendo a la vez**, así que
+ * arrancar uno con otro ya andando FALLA. Y `tool_input` está igual de presente cuando falla.
+ *
+ * Confiando en la entrada, ese fallo quedaría anotado como "reloj corriendo". El síntoma sería
+ * que `release` se niega a soltar la tarea pidiendo que pares un cronómetro que nunca arrancó —
+ * un candado trabado por un evento que no ocurrió, que es la peor clase de candado.
+ *
+ * Entonces la confirmación se exige del RESULTADO: una entrada de tiempo real trae la tarea a la
+ * que pertenece, o al menos su marca de arranque. Sin eso no se registra nada.
+ *
+ * Y la asimetría al final es deliberada:
+ *
+ *   · un `start` sin confirmar → no se anota. Peor caso: no avisamos de un reloj. Como antes.
+ *   · un `stop`  sin confirmar → NO se apaga el registro. Si el stop falló, el reloj SIGUE
+ *     corriendo, y seguir considerándolo corriendo es exactamente lo correcto.
+ */
+function evidenciaDeCronometro(payload, { arranca } = {}) {
+  const r = payload?.tool_response;
+  if (r == null) return { confirmed: false, taskId: null };
+  if (r.isError === true || r.is_error === true) return { confirmed: false, taskId: null };
+
+  const texto = textoDeRespuesta(r);
+  if (!texto) return { confirmed: false, taskId: null };
+
+  // Una red de seguridad para el conector que devuelve un error SIN marcarlo, ecoando la entrada.
+  //
+  // Va solo en el arranque, y esa asimetría es la misma de siempre: acá un falso positivo crea un
+  // reloj fantasma que traba `release`, mientras que en la parada un falso negativo dejaría el
+  // reloj anotado como corriendo — que es el lado seguro. Aplicarla también al `stop` cambiaría
+  // el error barato por el caro: una tarea llamada "arreglar el 401 unauthorized" bloquearía el
+  // cierre hasta que alguien corra `timer clear`, sin entender por qué.
+  if (arranca && /(only one timer|needs authentication|rate limit)/i.test(texto)) {
+    return { confirmed: false, taskId: null };
+  }
+
+  const url = texto.match(/app\.clickup\.com\/t\/([A-Za-z0-9_-]{4,40})/);
+  const anidado = texto.match(/"task"\s*:\s*\{[^}]*?"id"\s*:\s*"([^"]{4,40})"/);
+  // La marca de una entrada de tiempo de verdad. El `id` de la raíz NO sirve: es el de la
+  // ENTRADA de tiempo, no el de la tarea, y anotarlo como tarea sería peor que no anotar nada.
+  const marca = /"(?:start|end|duration|interval)"\s*:/.test(texto);
+  const taskId = url?.[1] ?? anidado?.[1] ?? null;
+
+  if (!taskId && !marca) return { confirmed: false, taskId: null };
+  return { confirmed: true, taskId };
+}
+
+/**
+ * Hook `PostToolUse` sobre las herramientas de TIEMPO del MCP de ClickUp.
+ *
+ * Existe por el mismo motivo que su hermano de mutaciones y con la misma regla: el modelo es el
+ * único que puede prender el reloj, pero deja de ser el único que sabe si lo prendió. Lo que
+ * cambia es qué se hace con el dato — este registro NO abre el candado de escritura, solo
+ * contesta "¿quedó algo corriendo?". Ver `recordTimerEvent` en state.mjs.
+ */
+async function cmdTimerHook() {
+  const payload = await readHookInput();
+  const cwd = hookCwd(payload);
+  const { config, ok } = loadConfig();
+  if (!ok) return 0;
+
+  const ctx = buildContext(config, cwd);
+  if (!ctx.registered) return 0;
+
+  const tool = String(payload?.tool_name ?? '');
+  const corto = tool.split('__').pop();
+  if (!MCP_TIME_TOOLS.includes(corto)) return 0;
+
+  // Que el hook haya corrido es la prueba de que ESTE matcher funciona en esta instalación, y se
+  // marca aunque la llamada haya fallado: una llamada fallida también demuestra que el nombre de
+  // la herramienta coincide. Es la misma válvula que `markEvidenceSeen`, en su propio archivo.
+  markTimerSeen();
+
+  // Una carga manual de horas no prende ni apaga ningún reloj: deja una entrada ya cerrada.
+  if (corto === 'clickup_add_time_entry') return 0;
+
+  const arranca = corto === 'clickup_start_time_tracking';
+  const { confirmed, taskId } = evidenciaDeCronometro(payload, { arranca });
+  if (!confirmed) return 0;
+
+  const clave = ctx.matchedKey || ctx.cwd;
+  const deLaEntrada = String(payload?.tool_input?.task_id ?? '').trim() || null;
+  recordTimerEvent(clave, {
+    tool,
+    // `stop_time_tracking` no recibe `task_id` — para eso está el fallback al estado local, que
+    // es justamente lo que sabemos porque nosotros lo arrancamos.
+    taskId: taskId ?? deLaEntrada ?? readState(clave).timer?.task_id ?? null,
+    running: arranca,
+  });
+  return 0;
+}
+
+// ---------------------------------------------------------------------------------------------
 // Hook: Stop — la obligación
 // ---------------------------------------------------------------------------------------------
 
@@ -883,6 +1072,15 @@ function cmdStatus(args) {
   } else if (ctx.exemption.expired) {
     lines.push('exención        VENCIDA');
   }
+  if (ctx.defaults.track_time) {
+    lines.push(
+      `cronómetro      ${
+        ctx.timer.running
+          ? `CORRIENDO sobre ${ctx.timer.taskId ?? 's/id'} (${ctx.timer.hours.toFixed(1)}h)`
+          : 'parado'
+      }${ctx.timeTracking.ok ? '' : `   — atribución sin resolver (${ctx.timeTracking.reason})`}`,
+    );
+  }
   say(lines.join('\n'));
   return 0;
 }
@@ -1017,6 +1215,37 @@ function cmdRelease(args) {
     return 1;
   }
 
+  // No se suelta una tarea dejando el cronómetro corriendo.
+  //
+  // Es el modo de fallo clásico del time tracking, y no hace falta imaginarlo: se cierra la
+  // tarea, el reloj queda andando, y a la mañana siguiente hay catorce horas cargadas en un
+  // trabajo de dos. Nadie las corrige, porque para cuando se ven ya nadie se acuerda.
+  //
+  // Solo mira los relojes que ESTA herramienta vio arrancar (ver `timerStatus`): si el hook nunca
+  // corrió no hay nada anotado y esto no se dispara nunca, que es el fallo abierto correcto.
+  const reloj = timerStatus(state);
+  if (reloj.running && !args.force) {
+    err(
+      [
+        `No se puede soltar ${current.task_id}: el cronómetro de ClickUp sigue CORRIENDO.`,
+        '',
+        `  arrancado:  ${reloj.startedAt}`,
+        `  sobre:      ${reloj.taskId ?? current.task_id}`,
+        `  lleva:      ${reloj.hours.toFixed(1)}h`,
+        '',
+        'Pará el reloj antes de cerrar, con la descripción de qué se hizo:',
+        '',
+        '    clickup_stop_time_tracking  description:"<qué se hizo>"',
+        '',
+        'Si el reloj ya lo paraste por fuera de Claude Code (la app, el móvil), reconciliá el',
+        'registro local y volvé a soltar:  clickup-flow timer clear',
+        '',
+        'Si preferís soltar igual y dejarlo corriendo a propósito:  release --force',
+      ].join('\n'),
+    );
+    return 1;
+  }
+
   // No se suelta una tarea de la que el harness nunca vio una mutación.
   //
   // Este es el chequeo que convierte el cierre en algo verificado en vez de anunciado. El hook
@@ -1067,10 +1296,137 @@ function cmdRelease(args) {
   const sinEvidencia = !hasMcpEvidence(state, current.task_id, current.claimed_at);
   clearClaim(cwd);
   if (state.sync_failed) clearSyncFailed(cwd);
+  // El cronómetro ya parado no le sirve a nadie: se limpia con el claim. Si sigue corriendo
+  // (solo posible con --force) se DEJA anotado, para que el próximo `timer status` lo diga.
+  if (!reloj.running) clearTimer(cwd);
   say(`Claim liberado (${current.task_id ?? 's/id'}). El candado vuelve a pedir tarea.`);
+  if (reloj.running) {
+    say(`⚠ El cronómetro quedó corriendo sobre ${reloj.taskId ?? current.task_id}. Paralo vos.`);
+  }
   if (sinEvidencia) {
     say('⚠ Se soltó con --force SIN evidencia de ninguna mutación en ClickUp.');
     say('  Si esa tarea existe, quedó abierta y sin el registro de este trabajo.');
+  }
+  return 0;
+}
+
+// ---------------------------------------------------------------------------------------------
+// timer — el cronómetro, y de quién son las horas
+// ---------------------------------------------------------------------------------------------
+
+/** Las tres formas de no poder arrancar el reloj, dichas para un humano. */
+function explicarAtribucion(config, verdict) {
+  const mio = config?.identity?.clickup_user_id ?? '<sin resolver>';
+  if (verdict.reason === 'identity') {
+    return [
+      'Todavía no sabemos quién sos en ClickUp, y el reloj corre a nombre del dueño del token —',
+      'no de quien ejecuta. Sin tu id no hay contra qué comparar, así que no se puede saber si',
+      'esas horas serían tuyas o de otra persona.',
+      '',
+      'Resolvé tu identidad primero:',
+      '',
+      '    clickup-flow identity set --id <id> --email <email> --confirmed',
+    ].join('\n');
+  }
+  if (verdict.reason === 'unchecked') {
+    return [
+      'Falta verificar de quién es el token de este conector.',
+      '',
+      'Las herramientas de tiempo del MCP no reciben un asignado: el reloj corre SIEMPRE para el',
+      'dueño del token OAuth, no para quien ejecuta. Si no son la misma persona, tus horas se le',
+      'cargan a otro y no falla nada — se descubre semanas después mirando un reporte.',
+      '',
+      'Desde Claude Code, resolvé `clickup_resolve_assignees(["me"])` y registrá lo que devuelva:',
+      '',
+      '    clickup-flow timer verify --user-id <el id que devolvió "me">',
+    ].join('\n');
+  }
+  return [
+    `El token de este conector NO es tuyo: "me" resuelve a ${verdict.tokenUserId}, y vos sos ${mio}.`,
+    '',
+    'El cronómetro queda DESACTIVADO en esta máquina, a propósito. Cada hora que registres se le',
+    `cargaría a ${verdict.tokenUserId} — es el mismo agujero que ya prohibimos para asignar con`,
+    '"me", pero sobre datos de facturación, y en silencio.',
+    '',
+    'La salida real es conectar TU cuenta de ClickUp en claude.ai (Settings → Connectors) y',
+    'volver a verificar. Si el conector es una cuenta de integración compartida, el tiempo hay',
+    'que cargarlo desde la app de ClickUp de cada persona.',
+  ].join('\n');
+}
+
+function cmdTimer(args) {
+  const cwd = canonicalProjectKey(args.cwd || process.cwd());
+  const { config, ok } = loadConfig();
+  if (!ok) {
+    err('config ilegible — corré `clickup-flow doctor`');
+    return 1;
+  }
+  const sub = String(args._[0] ?? 'status');
+
+  if (sub === 'verify') {
+    const id = args['user-id'] || args.id;
+    if (!id || !String(id).trim()) {
+      err(
+        [
+          'Falta --user-id, y es el dato entero de este comando.',
+          '',
+          'Desde Claude Code: `clickup_resolve_assignees(["me"])`. Eso devuelve el id del DUEÑO',
+          'DEL TOKEN, que es a quien se le van a cargar las horas. Registralo acá:',
+          '',
+          '    clickup-flow timer verify --user-id <ese id>',
+        ].join('\n'),
+      );
+      return 1;
+    }
+    config.identity.token_user_id = String(id).trim();
+    config.identity.token_checked_at = new Date().toISOString();
+    saveConfig(config);
+
+    const verdict = timeTrackingReady(config);
+    if (verdict.ok) {
+      say(`✓ El token de este conector es tuyo (${verdict.tokenUserId}).`);
+      say('  El cronómetro puede usarse: las horas se registran a tu nombre.');
+      return 0;
+    }
+    err(explicarAtribucion(config, verdict));
+    return 1;
+  }
+
+  if (sub === 'clear') {
+    const had = clearTimer(cwd);
+    say(
+      had
+        ? 'Registro local del cronómetro borrado. Ojo: esto NO para el reloj en ClickUp.'
+        : 'No había ningún cronómetro registrado.',
+    );
+    if (had) say('  Si quedó corriendo de verdad, paralo con `clickup_stop_time_tracking`.');
+    return 0;
+  }
+
+  if (sub !== 'status') {
+    err(`Subcomando desconocido: ${sub}. Uso: clickup-flow timer [status|verify|clear]`);
+    return 1;
+  }
+
+  const ctx = buildContext(config, cwd);
+  const verdict = timeTrackingReady(config);
+  const salud = timerHealth();
+  const reloj = timerStatus(readState(ctx.matchedKey || ctx.cwd));
+
+  say(`proyecto        ${ctx.cwd}`);
+  say(`tiempo          ${ctx.defaults.track_time ? 'se registra en este proyecto' : 'no se registra acá'}`);
+  say(
+    `atribución      ${verdict.ok ? `verificada (${verdict.tokenUserId})` : `SIN RESOLVER (${verdict.reason})`}`,
+  );
+  say(`hook            ${salud.everSeen ? `armado (${salud.count} eventos)` : 'nunca corrió'}`);
+  if (reloj.running) {
+    say(`cronómetro      CORRIENDO sobre ${reloj.taskId ?? 's/id'} desde hace ${reloj.hours.toFixed(1)}h`);
+  } else {
+    say('cronómetro      parado');
+  }
+  if (!verdict.ok) {
+    say('');
+    say(explicarAtribucion(config, verdict));
   }
   return 0;
 }
@@ -1571,6 +1927,7 @@ function cmdProject(args) {
       auto_assign: 'auto-assign',
       end_date_field: 'end-date-field',
       search_window_days: 'search-window-days',
+      track_time: 'track-time',
     };
     for (const key of OVERRIDABLE) {
       const raw = args[flagFor[key]];
@@ -1882,6 +2239,30 @@ function cmdDoctor(args = { _: [] }) {
           } else {
             lines.push('  tarea         ninguna reclamada');
           }
+          if (ctx.defaults.track_time) {
+            const salud = timerHealth();
+            lines.push(
+              `  tiempo        SÍ se registra — atribución ${
+                ctx.timeTracking.ok
+                  ? `verificada (${ctx.timeTracking.tokenUserId})`
+                  : `SIN RESOLVER (${ctx.timeTracking.reason})`
+              }`,
+            );
+            if (!ctx.timeTracking.ok) {
+              // No es un problema de la instalación sino una verificación pendiente: el
+              // cronómetro simplemente no se ofrece. Warning, no problem.
+              lines.push('                el cronómetro no se usa hasta `clickup-flow timer verify`');
+              warnings++;
+            }
+            if (!salud.everSeen) {
+              lines.push('                hook de tiempo: nunca corrió (no se exige nada todavía)');
+            }
+            if (ctx.timer.running) {
+              lines.push(
+                `  ⏱ CORRIENDO   cronómetro sobre ${ctx.timer.taskId ?? 's/id'} hace ${ctx.timer.hours.toFixed(1)}h`,
+              );
+            }
+          }
           if (ctx.syncFailed) {
             lines.push(`  ⚠ BLOQUEADO   sincronización pendiente de ${ctx.syncFailed.task_id ?? 's/id'}`);
             lines.push(`                desde ${ctx.syncFailed.at} — ${ctx.syncFailed.reason}`);
@@ -2123,6 +2504,10 @@ Trabajo diario
   claim --task-id <id> --title "<t>" [--role backend|frontend]
   release                     Suelta el claim (al cerrar o al retirarse)
   exempt --reason "<motivo>" [--hours N] | exempt --clear
+  timer status | verify --user-id <id> | clear
+      status    ¿hay un reloj corriendo, y las horas van a tu nombre?
+      verify    registra a quién resuelve "me" en este conector — sin esto el reloj NO arranca
+      clear     olvida el reloj local (NO lo para en ClickUp)
 
 Configuración
   project show | list | set | adopt | snooze | exclude | forget
@@ -2130,6 +2515,7 @@ Configuración
       snooze [--days N]           pospone la pregunta de alta en esta carpeta
       set acepta, además de las coordenadas, overrides por proyecto:
       --use-dates --use-priorities --auto-assign --end-date-field --search-window-days
+      --track-time                cronómetro de ClickUp en este proyecto
       y los nombres REALES de los estados del tablero:
       --role backend|frontend|fullstack   --counterpart <ruta del otro proyecto>|none
       --status-todo --status-in-progress --status-on-hold --status-handoff --status-done
@@ -2141,7 +2527,7 @@ Configuración
   doctor                      Verifica la instalación
 
 Hooks (los invoca el harness, no vos)
-  session-start | guard | sync-hook | stop-hook
+  session-start | guard | timer-guard | sync-hook | timer-hook | stop-hook
   prompt-hook                 obsoleto: ya no se instala, sale sin hacer nada
 `;
 
@@ -2159,6 +2545,10 @@ async function main() {
       return cmdGuard();
     case 'sync-hook':
       return cmdSyncHook();
+    case 'timer-guard':
+      return cmdTimerGuard();
+    case 'timer-hook':
+      return cmdTimerHook();
     case 'stop-hook':
       return cmdStopHook();
     case 'context':
@@ -2171,6 +2561,8 @@ async function main() {
       return cmdRelease(args);
     case 'exempt':
       return cmdExempt(args);
+    case 'timer':
+      return cmdTimer(args);
     case 'identity':
       return cmdIdentity(args);
     case 'team':

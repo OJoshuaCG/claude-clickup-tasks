@@ -13,6 +13,7 @@
 import {
   MODES,
   identityReady,
+  timeTrackingReady,
   isActive,
   formatListPath,
   resolveProject,
@@ -24,7 +25,13 @@ import {
   roleBehaviour,
 } from './config.mjs';
 import { cliInvocation } from './paths.mjs';
-import { readState, exemptionStatus, claimVerified, evidenceHealth } from './state.mjs';
+import {
+  readState,
+  exemptionStatus,
+  claimVerified,
+  evidenceHealth,
+  timerStatus,
+} from './state.mjs';
 
 const TASK_URL = (id) => `https://app.clickup.com/t/${id}`;
 
@@ -84,6 +91,10 @@ export function buildContext(config, cwd) {
     claim: state.claim,
     // El claim está verificado solo si el harness vio la mutación MCP. Ver `recordMcpWrite`.
     claimVerified: claimVerified(state),
+    // El cronómetro que ESTA herramienta vio arrancar, y si las horas van a ir a nombre de quien
+    // ejecuta o de otra persona. Lo segundo decide si el protocolo siquiera lo ofrece.
+    timer: timerStatus(state),
+    timeTracking: timeTrackingReady(config),
     // Salud del mecanismo de evidencia. Perezoso: solo lo miran `stop-hook`, `release` y
     // `doctor`, y es un `readFileSync` que el guard no tiene por qué pagar en cada Bash.
     get evidence() {
@@ -648,10 +659,12 @@ export function renderContext(ctx) {
   );
   out.push('```');
   out.push('');
+  out.push(...renderTimerClaim(ctx));
 
   // ---- Closing --------------------------------------------------------------------------
   out.push('## Paso 3 — Cerrar');
   out.push('');
+  out.push(...renderTimerClose(ctx));
   if (rb.canHandoff) {
     out.push(`**La pregunta obligatoria: ¿esto necesita trabajo de \`${rb.counterpart}\`?**`);
     out.push('');
@@ -787,6 +800,24 @@ export function renderContext(ctx) {
       'posición del array, sin error.** Si no lo chequeás, mandás `[null]` como asignados.',
   );
   out.push('- **`"me"` resuelve al dueño del token**, nunca al ejecutor. No lo uses para asignar.');
+  // La advertencia de atribución va SIEMPRE, aunque este proyecto no registre tiempo, y es
+  // deliberado: el usuario puede pedir "cargá dos horas" en cualquier repo, y sin esta línea el
+  // modelo no tiene cómo saber que la hora se le carga al dueño del token. Vive al lado de la
+  // prohibición de `"me"` porque es literalmente el mismo agujero, y las dos son reglas de
+  // seguridad — el tipo de cosa que no se omite para ahorrar dos renglones.
+  out.push(
+    '- **Las herramientas de tiempo no reciben a quién se le carga la hora.** ' +
+      '`clickup_start_time_tracking` y `clickup_add_time_entry` registran SIEMPRE a nombre del ' +
+      `dueño del token. Por eso el cronómetro no se usa sin \`${ctx.cli} timer verify\`.`,
+  );
+  // Esta otra es OPERATIVA: solo importa si vas a manejar el reloj. En un proyecto que no
+  // registra tiempo es contexto quemado en un documento que ya es largo.
+  if (d.track_time) {
+    out.push(
+      '- **Un solo cronómetro corriendo por persona.** Arrancar uno con otro andando falla, y ' +
+        '`clickup_stop_time_tracking` no recibe `task_id`: para el que esté corriendo, sea cual sea.',
+    );
+  }
   out.push('- `start_date` / `due_date` aceptan `YYYY-MM-DD`; `"none"` los limpia (solo en update).');
   out.push('- `priority` se **lee** como objeto y se **escribe** como string. No son la misma forma.');
   out.push(
@@ -810,6 +841,107 @@ export function renderContext(ctx) {
   );
 
   return out.join('\n');
+}
+
+/**
+ * El bloque del cronómetro al RECLAMAR.
+ *
+ * Devuelve un array de líneas, vacío cuando el proyecto no registra tiempo. Tres estados y no
+ * dos, porque "el proyecto registra tiempo" y "se puede registrar sin cargárselo a otro" son
+ * preguntas distintas, y la segunda es la que manda.
+ */
+function renderTimerClaim(ctx) {
+  if (!ctx.defaults.track_time) return [];
+  const out = [];
+
+  if (!ctx.timeTracking.ok) {
+    out.push('### ⏱ El cronómetro está PEDIDO en este proyecto, pero NO se puede usar todavía');
+    out.push('');
+    out.push(
+      '**No arranques ningún cronómetro.** Las herramientas de tiempo del MCP no reciben a quién ' +
+        'se le carga la hora: el reloj corre **siempre para el dueño del token OAuth**, no para ' +
+        'quien ejecuta. Es el mismo agujero que ya está prohibido para asignar con `"me"`, pero ' +
+        'sobre horas — y las horas suelen ser lo que se factura.',
+    );
+    out.push('');
+    if (ctx.timeTracking.reason === 'identity') {
+      out.push(
+        'Falta resolver **tu** identidad de ClickUp. Hasta que esté, no hay contra qué comparar.',
+      );
+    } else if (ctx.timeTracking.reason === 'unchecked') {
+      out.push('Falta verificar **de quién es el token de este conector**. Se hace una sola vez:');
+      out.push('');
+      out.push('```');
+      out.push('1. clickup_resolve_assignees(["me"])   → devuelve el id del DUEÑO DEL TOKEN');
+      out.push('```');
+      out.push('```bash');
+      out.push(`2. ${ctx.cli} timer verify --user-id <ese id>`);
+      out.push('```');
+      out.push('');
+      out.push(
+        `Si coincide con tu id (\`${ctx.identity.clickup_user_id ?? '<sin resolver>'}\`), el ` +
+          'cronómetro queda habilitado. Si no coincide, queda desactivado a propósito y hay que ' +
+          'decírselo al usuario: su tiempo se le estaría cargando a otra persona.',
+      );
+    } else {
+      out.push(
+        `**El token de este conector es de otra persona** (\`${ctx.timeTracking.tokenUserId}\`, y ` +
+          `vos sos \`${ctx.identity.clickup_user_id}\`). El cronómetro queda desactivado. Decíselo ` +
+          'al usuario: para registrar tiempo hay que conectar su propia cuenta de ClickUp en ' +
+          'claude.ai, o cargar las horas desde la app.',
+      );
+    }
+    out.push('');
+    return out;
+  }
+
+  out.push('### ⏱ Arrancá el cronómetro, junto con el claim');
+  out.push('');
+  out.push('```');
+  out.push('clickup_start_time_tracking');
+  out.push('  task_id:     "<tarea>"');
+  out.push('  description: "<en qué vas a trabajar, corto>"');
+  out.push('```');
+  out.push('');
+  out.push(
+    '**ClickUp permite UN solo reloj corriendo por persona.** Si ya había otro andando, este ' +
+      'arranque **falla** — no lo reintentes a ciegas: preguntale al usuario si hay que parar el ' +
+      'anterior, porque pararlo cierra una entrada de tiempo de otro trabajo.',
+  );
+  out.push('');
+  out.push(
+    'Si al reclamar la tarea el trabajo **ya venía hecho** de antes (una sesión previa, o tiempo ' +
+      'trabajado fuera de Claude Code), no inventes el arranque: cargá esa parte a mano con ' +
+      '`clickup_add_time_entry` (`start` + `duration`) y arrancá el reloj solo para lo que sigue.',
+  );
+  out.push('');
+  return out;
+}
+
+/** El bloque del cronómetro al CERRAR. Va antes del cambio de estado, no después. */
+function renderTimerClose(ctx) {
+  if (!ctx.defaults.track_time || !ctx.timeTracking.ok) return [];
+  const out = [];
+  out.push('### ⏱ Primero parás el reloj, después cerrás');
+  out.push('');
+  out.push('```');
+  out.push('clickup_stop_time_tracking');
+  out.push('  description: "<qué se hizo, corto>"');
+  out.push('```');
+  out.push('');
+  out.push(
+    '**En ese orden, y no es cosmético.** Si cerrás primero y el turno se corta en el medio, el ' +
+      'reloj queda corriendo sobre una tarea ya cerrada: nadie lo mira, y a la mañana siguiente ' +
+      `hay horas de más que ya nadie sabe corregir. Por eso \`${ctx.cli} release\` **se niega a ` +
+      'soltar el claim** mientras haya un cronómetro corriendo.',
+  );
+  out.push('');
+  out.push(
+    '**Si te retirás a mitad, el reloj se para igual.** `on hold` con el reloj andando es la ' +
+      'misma trampa, y encima disimulada por días.',
+  );
+  out.push('');
+  return out;
 }
 
 function renderSearch(ctx) {

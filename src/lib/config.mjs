@@ -222,12 +222,30 @@ export function defaultConfig() {
       // Git emails known to belong to this same human. Used to recognise your own INICIO
       // comments instead of reading them as somebody else's collision.
       git_emails: [],
+      // A QUIÉN resuelve `"me"` en ESTE conector: el dueño del token OAuth.
+      //
+      // No es lo mismo que `clickup_user_id`, y toda la seguridad del cronómetro descansa en esa
+      // diferencia. Las herramientas de tiempo del MCP no aceptan un asignado: el reloj corre
+      // SIEMPRE para el dueño del token. Si ese dueño no sos vos, cada hora que registres se le
+      // carga a otra persona, sin error y sin aviso — el mismo agujero que ya prohibimos para
+      // `"me"` en los assignees, pero sobre datos de facturación.
+      //
+      // `null` significa "todavía no se verificó", y con eso el cronómetro NO arranca.
+      token_user_id: null,
+      token_checked_at: null,
     },
     defaults: {
       workspace_id: null,
       use_dates: true,
       use_priorities: true,
       auto_assign: true,
+      // ¿Este proyecto registra el tiempo trabajado en ClickUp?
+      //
+      // Apagado por defecto, y no por timidez: encenderlo escribe entradas de tiempo en un
+      // tablero compartido, que en muchos equipos son datos de facturación. Un default que
+      // empieza a cargar horas sin que nadie lo haya pedido es una herramienta que se desinstala.
+      // Se enciende por proyecto en `/clickup-setup`.
+      track_time: false,
       // Where the completion date is written.
       //   'description'  → a `**Finalizado:** YYYY-MM-DD` line + ClickUp's own date_closed.
       //   'due_date'     → overwrite due_date (only for boards that already use it that way).
@@ -710,6 +728,10 @@ export const OVERRIDABLE = Object.freeze([
   'auto_assign',
   'end_date_field',
   'search_window_days',
+  // Por proyecto y no global: en un mismo equipo conviven el repo del cliente que se factura por
+  // hora y la herramienta interna donde registrar tiempo es puro ruido. Una respuesta global
+  // tendría que estar mal en uno de los dos.
+  'track_time',
 ]);
 
 /** Global defaults with a project's overrides applied on top. */
@@ -728,6 +750,31 @@ export function effectiveDefaults(config, entry) {
 export function identityReady(config) {
   const id = config?.identity?.clickup_user_id;
   return Boolean(id && String(id).trim() && config.identity.confirmed);
+}
+
+/**
+ * ¿Se puede arrancar el cronómetro sin cargarle las horas a otra persona?
+ *
+ * Devuelve `{ ok, reason }`, y `reason` es un código, no una frase: quien renderiza decide cómo
+ * decirlo. Tres formas de fallar, todas cerradas:
+ *
+ *   'identity'  → no sabemos quién sos en ClickUp. Sin eso no hay nada contra qué comparar.
+ *   'unchecked' → nunca se verificó a quién pertenece el token de este conector.
+ *   'mismatch'  → se verificó, y el token es de OTRA persona. Acá el cronómetro no se toca.
+ *
+ * El caso 'mismatch' es el que justifica todo este mecanismo. Es indetectable desde el resultado
+ * de la llamada —el reloj arranca, la herramienta devuelve éxito— y se descubre semanas después,
+ * cuando alguien mira el reporte de horas y ve el trabajo de cuatro personas cargado a una sola.
+ */
+export function timeTrackingReady(config) {
+  const mine = config?.identity?.clickup_user_id;
+  if (!identityReady(config)) return { ok: false, reason: 'identity', tokenUserId: null };
+  const token = config?.identity?.token_user_id;
+  if (!token || !String(token).trim()) return { ok: false, reason: 'unchecked', tokenUserId: null };
+  if (String(token).trim() !== String(mine).trim()) {
+    return { ok: false, reason: 'mismatch', tokenUserId: String(token).trim() };
+  }
+  return { ok: true, reason: null, tokenUserId: String(token).trim() };
 }
 
 /** Record a git email as belonging to this human, so their own comments read as their own. */

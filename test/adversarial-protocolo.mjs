@@ -152,6 +152,11 @@ check('nunca filtra "undefined" ni NaN con defaults raros', () => {
     { end_date_field: null },
     { end_date_field: 'inventado' },
     { use_dates: null },
+    // El cronómetro tiene tres estados de atribución y los tres imprimen prosa distinta. Con la
+    // identidad resuelta pero el token sin verificar se renderiza el bloque "todavía no": es el
+    // que interpola ids, y por lo tanto el que puede filtrar `undefined`.
+    { track_time: true },
+    { track_time: 'sí' },
   ]) {
     const out = PR.renderContext(ctxFor({ mode: 'tasks', list_id: '1' }, d));
     assert(!out.includes('undefined'), `undefined con ${JSON.stringify(d)}`);

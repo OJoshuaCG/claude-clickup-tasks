@@ -271,13 +271,14 @@ check('conserva los hooks preexistentes del usuario', () => {
   assert(commands.includes('echo hook-del-usuario'), 'se perdió el SessionStart del usuario');
 });
 
-check('registra sus cuatro hooks propios', () => {
+check('registra sus seis hooks propios', () => {
   const s = readSettings();
-  assertEqual(ourHooks().length, 4, 'no quedaron exactamente 4 hooks nuestros');
+  assertEqual(ourHooks().length, 6, 'no quedaron exactamente 6 hooks nuestros');
   const flat = JSON.stringify(s.hooks);
   assert(flat.includes('session-start'), 'falta session-start');
   assert(flat.includes('guard'), 'falta guard');
   assert(flat.includes('sync-hook'), 'falta sync-hook (la evidencia del PostToolUse)');
+  assert(flat.includes('timer-hook'), 'falta timer-hook (el cronómetro)');
   assert(flat.includes('stop-hook'), 'falta stop-hook (la obligación de cerrar)');
   assert(!flat.includes('cli.mjs" prompt-hook'), 'el hook por prompt no debería instalarse más');
 
@@ -290,6 +291,18 @@ check('registra sus cuatro hooks propios', () => {
 
   const post = (s.hooks.PostToolUse ?? []).find((g) => /clickup_create_task/.test(g.matcher ?? ''));
   assert(post, 'el sync-hook no quedó atado a las herramientas de escritura del MCP');
+
+  // El cronómetro va en un matcher APARTE, y eso se verifica. Si compartieran grupo, prender el
+  // reloj contaría como evidencia de que el trabajo quedó anotado en la tarea — y entonces se
+  // podría reclamar, prender el reloj, escribir código y soltar el claim sin comentar nada.
+  const tiempo = (s.hooks.PostToolUse ?? []).find((g) =>
+    /clickup_start_time_tracking/.test(g.matcher ?? ''),
+  );
+  assert(tiempo, 'el timer-hook no quedó atado a las herramientas de tiempo del MCP');
+  assert(
+    !/clickup_start_time_tracking/.test(post.matcher ?? ''),
+    'las herramientas de tiempo NO deben caer en el matcher de la evidencia de escritura',
+  );
 });
 
 check('conserva permisos allow y deny del usuario', () => {

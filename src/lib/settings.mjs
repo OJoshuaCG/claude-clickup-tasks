@@ -34,6 +34,10 @@ export const READONLY_MCP_PERMISSIONS = [
   'mcp__claude_ai_ClickUp__clickup_get_list',
   'mcp__claude_ai_ClickUp__clickup_get_folder',
   'mcp__claude_ai_ClickUp__clickup_get_custom_fields',
+  // Lecturas del cronómetro. `get_current_time_entry` es la que contesta "¿me quedó un reloj
+  // corriendo?", y pedir permiso para preguntar eso sería absurdo.
+  'mcp__claude_ai_ClickUp__clickup_get_current_time_entry',
+  'mcp__claude_ai_ClickUp__clickup_get_time_entries',
 ];
 
 export function readSettings() {
@@ -123,9 +127,44 @@ export const MCP_WRITE_TOOLS = [
   'clickup_delete_task',
 ];
 
+/**
+ * Herramientas del CRONÓMETRO. Van en su propio matcher, y no es un detalle de organización.
+ *
+ * Si estuvieran en `MCP_WRITE_TOOLS`, arrancar el reloj contaría como evidencia de que el trabajo
+ * quedó registrado en la tarea — y no lo es. Se podría reclamar, prender el cronómetro, escribir
+ * código y soltar el claim sin haber comentado ni cerrado nada, con el candado abriéndose solo.
+ * Ver `recordTimerEvent` en state.mjs: son dos registros distintos a propósito.
+ *
+ * `add_time_entry` está acá aunque sea una carga manual: también deja una entrada de tiempo, y
+ * también corre a nombre del dueño del token.
+ */
+export const MCP_TIME_TOOLS = [
+  'clickup_start_time_tracking',
+  'clickup_stop_time_tracking',
+  'clickup_add_time_entry',
+];
+
 /** El matcher de PostToolUse, anclado para que no cace herramientas de otro servidor MCP. */
 export function mcpWriteMatcher() {
   return `^mcp__claude_ai_ClickUp__(${MCP_WRITE_TOOLS.join('|')})$`;
+}
+
+/**
+ * Las que CARGAN tiempo, que es un subconjunto y no un sinónimo.
+ *
+ * `clickup_stop_time_tracking` queda deliberadamente afuera: el candado de atribución cuelga de
+ * este matcher, y bloquear la parada de un reloj sería encerrar al usuario adentro del problema
+ * en vez de dejarlo salir. Apagar el reloj no puede hacer daño; prenderlo a nombre de otro, sí.
+ */
+export const MCP_TIME_CHARGE_TOOLS = ['clickup_start_time_tracking', 'clickup_add_time_entry'];
+
+/** Ídem para el cronómetro. */
+export function mcpTimeMatcher() {
+  return `^mcp__claude_ai_ClickUp__(${MCP_TIME_TOOLS.join('|')})$`;
+}
+
+export function mcpTimeChargeMatcher() {
+  return `^mcp__claude_ai_ClickUp__(${MCP_TIME_CHARGE_TOOLS.join('|')})$`;
 }
 
 /**
@@ -178,6 +217,18 @@ export function hookSpecs(cliPath) {
       why: 'Registra las mutaciones REALES de ClickUp leyendo el resultado de la herramienta.',
     },
     {
+      event: 'PreToolUse',
+      matcher: mcpTimeChargeMatcher(),
+      command: invoke('timer-guard'),
+      why: 'Cancela cargar horas mientras no esté probado que el token es de quien ejecuta.',
+    },
+    {
+      event: 'PostToolUse',
+      matcher: mcpTimeMatcher(),
+      command: invoke('timer-hook'),
+      why: 'Sabe si el cronómetro de ClickUp quedó corriendo, mirando el resultado real.',
+    },
+    {
       event: 'Stop',
       matcher: null,
       command: invoke('stop-hook'),
@@ -187,7 +238,7 @@ export function hookSpecs(cliPath) {
 }
 
 /** Cuántos hooks debería haber instalados. `doctor` lo usa para no tener el número a mano. */
-export const HOOK_COUNT = 4;
+export const HOOK_COUNT = 6;
 
 function isOurHook(entry) {
   return typeof entry?.command === 'string' && entry.command.includes(HOOK_MARKER);
