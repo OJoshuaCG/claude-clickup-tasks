@@ -183,7 +183,19 @@ check('el directorio de trabajo borrado bajo los pies no cuelga ni revienta', ()
   const fantasma = path.join(sandbox, 'ya-no-existe');
   for (const h of HOOKS) {
     const r = run(sandbox, [h], JSON.stringify({ cwd: fantasma, tool_input: { file_path: 'a.js' } }));
-    assert(r.code === 0, `${h} con cwd inexistente → exit ${r.code}: ${r.err.slice(0, 200)}`);
+    // Lo que este test cuida es que no CUELGUE ni REVIENTE. Un cwd fantasma es un proyecto que
+    // nadie decidió, y ahí el guard pregunta una vez y sale con 2 — comportamiento deliberado,
+    // no un fallo. Lo inaceptable sería un 2 sin explicación, o un stack.
+    assert(
+      r.code === 0 || r.code === 2,
+      `${h} con cwd inexistente → exit ${r.code}: ${r.err.slice(0, 200)}`,
+    );
+    if (r.code === 2) {
+      assert(
+        /falta decidir si este proyecto/i.test(r.err),
+        `${h} salió con 2 sin explicar por qué: ${r.err.slice(0, 200)}`,
+      );
+    }
     assert(!tieneStack(r.out + r.err), `${h} filtró un stack`);
   }
 });

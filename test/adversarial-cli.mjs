@@ -319,7 +319,16 @@ check('con el config BORRADO, los hooks siguen callados y en 0', () => {
     fs.rmSync(cfgPath);
     for (const hook of HOOKS) {
       const r = run([hook], JSON.stringify({ cwd: proj, tool_input: { file_path: 'a.js' } }));
-      assert(r.code === 0, `${hook} sin config → exit ${r.code}`);
+      // Mismo criterio que el bucle de entradas hostiles: "callado" significa sin stack y sin
+      // frenazo mudo, no necesariamente exit 0. Sin config, el proyecto es desconocido y el guard
+      // pregunta una vez, que es su trabajo.
+      assert(r.code === 0 || r.code === 2, `${hook} sin config → exit ${r.code}`);
+      if (r.code === 2) {
+        assert(
+          /falta decidir si este proyecto/i.test(r.stderr),
+          `${hook} salió con 2 sin explicar por qué: ${r.stderr.slice(0, 200)}`,
+        );
+      }
     }
   } finally {
     fs.writeFileSync(cfgPath, bueno);
