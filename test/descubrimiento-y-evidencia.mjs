@@ -44,7 +44,18 @@ function assert(cond, label, detalle = '') {
 
 const sandbox = fs.mkdtempSync(path.join(os.tmpdir(), 'clickup-descubrimiento-'));
 const claudeHome = path.join(sandbox, 'claude');
+// `CLAUDE_CODE_SESSION_ID` se BORRA del entorno del sandbox, y no es cosmético.
+//
+// Estos tests corren adentro de una sesión de Claude Code, así que `process.env` trae el id real
+// de esa sesión. Sin borrarlo, un `claim` lanzado por el test quedaba grabado a nombre de la
+// sesión de quien corre los tests, mientras a los hooks se les alimenta un `session_id` sintético
+// (`s1`). Los dos no coinciden, el hook `Stop` concluye —correctamente— que esa tarea es de otra
+// sesión, y no exige nada: el test fallaba por no ser hermético, no por un defecto del producto.
+//
+// Sin la variable, los claims nacen sin sesión, que es el caso "de todos" y el que estos tests
+// quieren ejercitar. Ver `claimIsMine` en state.mjs.
 const env = { ...process.env, CLAUDE_CONFIG_DIR: claudeHome };
+delete env.CLAUDE_CODE_SESSION_ID;
 
 const NUEVO = canonicalProjectKey(path.join(sandbox, 'repo-nuevo'));
 const ACTIVO = canonicalProjectKey(path.join(sandbox, 'repo-activo'));

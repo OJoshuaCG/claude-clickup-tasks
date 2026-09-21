@@ -19,6 +19,14 @@ import path from 'node:path';
 import { execFileSync } from 'node:child_process';
 import { fileURLToPath } from 'node:url';
 
+// El número de hooks NO se escribe a mano.
+//
+// Estaba puesto a mano y quedó desfasado en silencio: los tests decían 3 cuando el producto ya
+// instalaba 6, y nadie se enteró hasta que alguien corrió el suite completo. Un test que afirma
+// un número viejo no falla ruidosamente: falla siempre, y se aprende a ignorarlo.
+import { HOOK_COUNT } from '../src/lib/settings.mjs';
+
+
 const HERE = path.dirname(fileURLToPath(import.meta.url));
 const REPO = path.resolve(HERE, '..');
 const INSTALLER = path.join(REPO, 'src', 'installer.mjs');
@@ -327,7 +335,7 @@ console.log('\nPASO 5 — cierre\n');
 
 step('doctor no reporta problemas con todo configurado', () => {
   const out = cli(['doctor']);
-  assert(out.includes('3/3'), 'no ve los hooks');
+  assert(out.includes(`${HOOK_COUNT}/${HOOK_COUNT}`), 'no ve los hooks');
   assert(out.includes('Todo en orden'), `reporta problemas:\n${out}`);
   assert(!out.includes('estados sin confirmar'), 'quedaron proyectos sin estados');
 });

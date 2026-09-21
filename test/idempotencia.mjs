@@ -17,6 +17,14 @@ import path from 'node:path';
 import { execFileSync, spawnSync } from 'node:child_process';
 import { fileURLToPath } from 'node:url';
 
+// El número de hooks NO se escribe a mano.
+//
+// Estaba puesto a mano y quedó desfasado en silencio: los tests decían 3 cuando el producto ya
+// instalaba 6, y nadie se enteró hasta que alguien corrió el suite completo. Un test que afirma
+// un número viejo no falla ruidosamente: falla siempre, y se aprende a ignorarlo.
+import { HOOK_COUNT } from '../src/lib/settings.mjs';
+
+
 const REPO = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
 const sandbox = fs.mkdtempSync(path.join(os.tmpdir(), 'cf-idem-'));
 const claude = path.join(sandbox, '.claude');
@@ -133,7 +141,7 @@ check('el instalador corrido 3 veces no duplica hooks ni acumula backups sin top
   const h3 = huella();
   const s = leerSettings();
   const refs = (JSON.stringify(s.hooks).match(/cli\.mjs/g) || []).length;
-  assert(refs === 3, `los hooks se duplicaron: ${refs} referencias al CLI`);
+  assert(refs === HOOK_COUNT, `los hooks se duplicaron: ${refs} referencias al CLI`);
   assert(JSON.stringify(s.hooks).includes('mio.sh'), 'perdió el hook del usuario');
   assert(
     JSON.stringify(h2.archivos) === JSON.stringify(h3.archivos),

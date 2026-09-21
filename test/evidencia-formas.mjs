@@ -209,11 +209,28 @@ check('los ids anidados de list/folder/space/creator no se cuelan', () => {
   assert(r.ids.length === 1 && r.ids[0] === T, `se coló algún anidado: ${JSON.stringify(r.ids)}`);
 });
 
-check('con VARIOS ids, el nombre no se le pega a ninguno', () => {
+check('un id de más en la ENTRADA no descarta la respuesta, que es autoritativa', () => {
+  // La respuesta de `create_task` dice cuál tarea se creó, y punto. Un `task_id` extra en la
+  // entrada es ruido. Este test nació de tener la precedencia al revés: la regla de "exactamente
+  // un id" pisaba la respuesta buena y el nombre se perdía.
   const r = hook({
     tool_name: CREATE,
     tool_input: { name: 'Nombre real', task_id: 'OTRA-9999' },
     tool_response: { success: true, task_id: T },
+  });
+  assert(r.ids.length > 1, 'el escenario no se armó: hacían falta dos ids');
+  assert(r.names[T] === 'Nombre real', `no se lo pegó a la tarea creada: ${JSON.stringify(r.names)}`);
+  assert(r.names['OTRA-9999'] === undefined, 'se lo pegó también al id de ruido');
+});
+
+check('sin respuesta legible Y con varios ids, no adivina a cuál pertenece el nombre', () => {
+  // La ambigüedad de verdad: el envoltorio MCP guarda el id adentro de un texto, así que
+  // `resp.task_id` es `undefined` y el único camino son los ids que sacó el extractor. Con más de
+  // uno no hay forma de saber cuál, y pegárselo al que no sería peor que no guardarlo.
+  const r = hook({
+    tool_name: CREATE,
+    tool_input: { name: 'Nombre real', task_id: 'OTRA-9999' },
+    tool_response: { content: [{ type: 'text', text: JSON.stringify({ success: true, task_id: T }) }] },
   });
   assert(r.ids.length > 1, 'el escenario no se armó: hacían falta dos ids');
   assert(

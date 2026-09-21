@@ -23,6 +23,14 @@ import { fileURLToPath } from 'node:url';
 // lógica del producto prueba su propia copia, no el producto.
 import { canonicalProjectKey } from '../src/lib/paths.mjs';
 
+// El número de hooks NO se escribe a mano.
+//
+// Estaba puesto a mano y quedó desfasado en silencio: los tests decían 3 cuando el producto ya
+// instalaba 6, y nadie se enteró hasta que alguien corrió el suite completo. Un test que afirma
+// un número viejo no falla ruidosamente: falla siempre, y se aprende a ignorarlo.
+import { HOOK_COUNT } from '../src/lib/settings.mjs';
+
+
 const HERE = path.dirname(fileURLToPath(import.meta.url));
 const REPO = path.resolve(HERE, '..');
 const INSTALLER = path.join(REPO, 'src', 'installer.mjs');
@@ -280,9 +288,9 @@ check('conserva los hooks preexistentes del usuario', () => {
   assert(commands.includes('echo hook-del-usuario'), 'se perdió el SessionStart del usuario');
 });
 
-check('registra sus seis hooks propios', () => {
+check('registra todos sus hooks propios', () => {
   const s = readSettings();
-  assertEqual(ourHooks().length, 6, 'no quedaron exactamente 6 hooks nuestros');
+  assertEqual(ourHooks().length, HOOK_COUNT, `no quedaron exactamente ${HOOK_COUNT} hooks nuestros`);
   const flat = JSON.stringify(s.hooks);
   assert(flat.includes('session-start'), 'falta session-start');
   assert(flat.includes('guard'), 'falta guard');
@@ -659,53 +667,62 @@ check('el hook por prompt quedó obsoleto pero no rompe un settings.json viejo',
   assertEqual(r.stdout.trim(), '', 'prompt-hook ya no debería decir nada');
 });
 
-check('un segundo claim distinto se RECHAZA, no pisa al primero', () => {
-  // Dos sesiones de Claude en el mismo repo (terminal + IDE) se pisaban el claim en silencio.
+check('un segundo claim sobre OTRA tarea CONVIVE, no pisa al primero', () => {
+  // ESTE TEST AFIRMABA LO CONTRARIO, y cambió porque cambió el contrato.
+  //
+  // Decía «un segundo claim distinto se RECHAZA». El rechazo existía por una limitación del
+  // formato —el estado guardaba UN claim por proyecto— y no por una regla del trabajo: con dos
+  // sesiones en el mismo repo (terminal e IDE) la segunda tarea se rechazaba pidiendo pausar la
+  // primera en `on hold`, que dejaba el tablero mintiendo.
+  //
+  // La regla nueva: **la unidad de exclusión es LA TAREA, no el proyecto.** Dos tareas distintas
+  // son trabajo en paralelo y conviven. Lo que sí se rechaza —dos sesiones sobre la MISMA tarea—
+  // se cubre en `multitarea.mjs`, que puede controlar el id de sesión.
+  const out = cli(['claim', '--task-id', 'OTRA-TAREA', '--title', 'sesión B', '--cwd', projectA], {
+    cwd: projectA,
+  });
+  assert(/2 tareas activas/.test(out), 'no avisa que el proyecto pasó a llevar dos');
+  assert(/--task-id/.test(out), 'no avisa que al cerrar el id pasa a ser obligatorio');
+  const st = cli(['status', '--cwd', projectA], { cwd: projectA });
+  assert(st.includes('86abc123'), 'perdió el claim original');
+  assert(st.includes('OTRA-TAREA'), 'no guardó el segundo');
+});
+
+check('con dos activas, release SIN id no elige NINGUNA', () => {
+  // La defensa contra cerrar la tarea equivocada no es una advertencia, es una ausencia: con más
+  // de una activa ningún comando tiene default. Un default acá cerraría la que no era y el
+  // comando reportaría éxito, que es el peor resultado posible.
   let threw = false;
   try {
-    cli(['claim', '--task-id', 'OTRA-TAREA', '--title', 'sesión B', '--cwd', projectA], {
-      cwd: projectA,
-    });
+    cli(['release', '--cwd', projectA], { cwd: projectA });
   } catch (err) {
     threw = true;
     const msg = err.stderr?.toString() ?? '';
-    assert(msg.includes('86abc123'), 'no dice cuál tarea está reclamada');
-    assert(msg.includes('OTRA sesión'), 'no menciona la posibilidad de otra sesión');
-    assert(msg.includes('--force'), 'no ofrece la salida explícita');
+    assert(msg.includes('86abc123') && msg.includes('OTRA-TAREA'), 'no lista las candidatas');
+    assert(msg.includes('--task-id'), 'no dice cómo desambiguar');
   }
-  assert(threw, 'aceptó un segundo claim y pisó el primero');
-  // Y el original sigue en pie.
+  assert(threw, 'eligió una por su cuenta');
+  // Volver a UNA sola activa para los tests siguientes. `--force` porque el harness nunca vio una
+  // mutación MCP sobre estas tareas de prueba.
+  cli(['release', '--task-id', 'OTRA-TAREA', '--force', '--cwd', projectA], { cwd: projectA });
   const st = cli(['status', '--cwd', projectA], { cwd: projectA });
-  assert(st.includes('86abc123'), 'perdió el claim original');
+  assert(st.includes('86abc123'), 'soltó la que no era');
+  assert(!st.includes('OTRA-TAREA'), 'no soltó la que se le pidió');
 });
 
-check('--force reemplaza el claim, avisando de lo que queda huérfano', () => {
-  const out = cli(['claim', '--task-id', 'FORZADA', '--title', 'x', '--force', '--cwd', projectA], {
-    cwd: projectA,
-  });
-  assert(out.includes('Reemplazado por --force'), 'no avisa del reemplazo');
-  assert(out.includes('sin nadie encima'), 'no advierte que la anterior quedó abierta');
-  // Volver al estado que esperan los tests siguientes. `--force` porque el harness nunca vio
-  // una mutación MCP sobre estas tareas de prueba, y sin él `release` ahora se niega.
-  cli(['release', '--force', '--cwd', projectA], { cwd: projectA });
-  cli(['claim', '--task-id', '86abc123', '--title', 'Arreglar el ruteo', '--cwd', projectA], {
-    cwd: projectA,
-  });
-});
-
-check('release con el id equivocado NO borra el claim de otra sesión', () => {
+check('release de un id que NO está reclamado se niega y lista lo que sí', () => {
   let threw = false;
   try {
     cli(['release', '--task-id', 'NO-ES-ESTA', '--cwd', projectA], { cwd: projectA });
   } catch (err) {
     threw = true;
     const msg = err.stderr?.toString() ?? '';
-    assert(msg.includes('NO es la tarea'), 'no explica el desajuste');
-    assert(msg.includes('86abc123'), 'no dice cuál es el claim vigente');
+    assert(/No hay ningún claim para/.test(msg), 'no explica el desajuste');
+    assert(msg.includes('86abc123'), 'no dice qué SÍ está reclamado acá');
   }
   assert(threw, 'soltó un claim que no era el suyo');
   const st = cli(['status', '--cwd', projectA], { cwd: projectA });
-  assert(st.includes('86abc123'), 'borró el claim de la otra sesión');
+  assert(st.includes('86abc123'), 'tocó el estado igual');
 });
 
 check('sin plomería probada, release NO se niega: falla abierto', () => {
@@ -1422,7 +1439,7 @@ process.stdout.write('\nDIAGNÓSTICO Y DESINSTALACIÓN\n');
 
 check('doctor reporta una instalación sana', () => {
   const out = cli(['doctor']);
-  assert(out.includes('3/3'), `no ve los tres hooks:\n${out}`);
+  assert(out.includes(`${HOOK_COUNT}/${HOOK_COUNT}`), `no ve los ${HOOK_COUNT} hooks:\n${out}`);
   assert(out.includes('Todo en orden'), `reporta problemas:\n${out}`);
 });
 

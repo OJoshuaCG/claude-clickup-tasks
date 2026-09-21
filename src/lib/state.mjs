@@ -11,7 +11,11 @@
 import fs from 'node:fs';
 import path from 'node:path';
 import { projectStateFile, statePath, canonicalProjectKey, writeJsonAtomic } from './paths.mjs';
-import { DEFAULT_EXEMPTION_HOURS, MAX_EXEMPTION_HOURS } from './config.mjs';
+import {
+  DEFAULT_EXEMPTION_HOURS,
+  MAX_EXEMPTION_HOURS,
+  DEFAULT_CLAIM_STALE_HOURS,
+} from './config.mjs';
 
 function emptyState() {
   return { claims: [], exemption: null, mcp: null, timer: null, sync_failed: [], stop: null };
@@ -312,6 +316,44 @@ export function claimNameMismatch(claim) {
   if (!canonico || !propio) return false;
   const norm = (t) => t.toLowerCase().replace(/\s+/g, ' ');
   return norm(canonico) !== norm(propio);
+}
+
+/**
+ * La última señal de vida de un claim: cuándo se reclamó, o la última mutación MCP sobre su
+ * tarea, lo que sea más reciente.
+ *
+ * Que cuente la evidencia y no solo `claimed_at` es la diferencia entre un vencimiento útil y uno
+ * que miente: quien está trabajando de verdad comenta el avance y mueve el estado, y cada una de
+ * esas llamadas es prueba de que sigue ahí. Sin esto, una tarea con actividad de hace un minuto
+ * quedaría declarada abandonada por haberse reclamado a la mañana.
+ */
+export function claimActivityAt(state, claim) {
+  if (!claim) return null;
+  let ultima = Date.parse(claim.claimed_at ?? '');
+  if (!Number.isFinite(ultima)) ultima = null;
+  for (const w of state?.mcp?.writes ?? []) {
+    if (w.task_id !== claim.task_id) continue;
+    const cuando = Date.parse(w.at ?? '');
+    if (Number.isFinite(cuando) && (ultima === null || cuando > ultima)) ultima = cuando;
+  }
+  return ultima === null ? null : new Date(ultima).toISOString();
+}
+
+/**
+ * ¿Este claim dejó de ser evidencia de que alguien está encima de la tarea?
+ *
+ * NO significa "la tarea venció" ni "el claim se soltó". Significa una sola cosa: que reclamar esa
+ * misma tarea desde otra sesión ya no cuenta como trabajo duplicado. Ver `DEFAULT_CLAIM_STALE_HOURS`.
+ *
+ * Sin fecha legible se considera VENCIDO. Es la dirección correcta: lo que se pierde es la
+ * protección contra pisar a alguien que probablemente ya no está, y lo que se ganaría por el otro
+ * lado es trabar una tarea para siempre por un timestamp roto.
+ */
+export function claimStale(state, claim, hours = DEFAULT_CLAIM_STALE_HOURS) {
+  const limite = Number.isFinite(hours) && hours > 0 ? hours : DEFAULT_CLAIM_STALE_HOURS;
+  const desde = Date.parse(claimActivityAt(state, claim) ?? '');
+  if (!Number.isFinite(desde)) return true;
+  return (Date.now() - desde) / 3_600_000 >= limite;
 }
 
 /** ¿Hay evidencia de una mutación MCP sobre `taskId` posterior a `desde`? */

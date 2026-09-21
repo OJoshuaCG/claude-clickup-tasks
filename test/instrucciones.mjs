@@ -164,7 +164,16 @@ const HERRAMIENTAS_REALES = new Set([
 ]);
 
 // Campos del config que empiezan igual que una herramienta y no lo son.
-const NO_SON_HERRAMIENTAS = new Set(['clickup_email', 'clickup_user_id', 'clickup_username', 'clickup_id']);
+// Campos, no herramientas. El escaneo busca `clickup_[a-z_]+` en las instrucciones para cazar
+// herramientas inventadas, y estos nombres caen en el patrón sin serlo: son claves del config o
+// del estado. `clickup_name` es la del claim que guarda el nombre real de la tarea.
+const NO_SON_HERRAMIENTAS = new Set([
+  'clickup_email',
+  'clickup_user_id',
+  'clickup_username',
+  'clickup_id',
+  'clickup_name',
+]);
 
 check('las preguntas al usuario van por la UI nativa, no por un menú de texto', () => {
   // Una versión anterior del setup imprimía listas numeradas y esperaba que el usuario contestara

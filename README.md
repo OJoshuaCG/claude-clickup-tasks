@@ -654,7 +654,40 @@ Los tres proyectos guardaban el claim en `.claude/.tarea-actual`, dentro del che
 en `~/.claude/clickup-flow/state/`. **La herramienta no escribe nada en tus repos** salvo que le
 pidas explícitamente la nota en el `CLAUDE.md`.
 
-### 8. N tareas activas por proyecto, y por qué nada elige por defecto
+### 8. La unidad de exclusión es la tarea, no el proyecto
+
+Todo lo que sigue cuelga de una sola frase, y conviene leerla antes que el resto:
+
+> **Dos sesiones sobre tareas distintas son trabajo en paralelo y nunca deben estorbarse.**
+> **Dos sesiones sobre la misma tarea es trabajo duplicado, y eso es lo único que amerita frenar.**
+
+El diseño original trataba el **proyecto** como la unidad de exclusión, y de ahí salían sus dos
+defectos a la vez: rechazaba la segunda tarea del repo, y el hook `Stop` bloqueaba cruzado. Los
+dos son el mismo error — frenar por coincidir de proyecto, que no es coincidir en nada.
+
+Corregirlo abrió el agujero opuesto, y también hubo que cerrarlo: al quitar el rechazo del segundo
+claim se lo quitó también a la **misma** tarea, así que una segunda sesión se quedaba con ella en
+silencio y le pisaba el título. La primera no se enteraba nunca. Un rechazo demasiado ancho estaba
+tapando, de rebote, el único caso que sí había que frenar.
+
+Hoy `claim` se niega en exactamente una situación —misma tarea, otra sesión, todavía con señales
+de vida— nombra quién la tiene, manda a leer los comentarios `INICIO`, y ofrece `--force`. Un
+candado sin salida documentada se saltea por afuera.
+
+**Un claim vence a las 2 horas sin señales de vida** (`defaults.claim_stale_hours`, configurable
+por proyecto). Vencer no suelta nada ni bloquea a nadie: lo único que cambia es que tomar esa
+tarea deja de necesitar `--force`. Y se mide desde la **última actividad** —la última mutación MCP
+registrada sobre esa tarea, no la hora en que se reclamó— porque quien está trabajando de verdad
+comenta el avance y mueve el estado. Vencer por el reloj del claim habría declarado abandonada una
+tarea con actividad de hace un minuto.
+
+**Lo que el candado no puede hacer, y conviene que esté escrito.** El criterio real es "la misma
+tarea *o el mismo propósito*", y el código solo puede exigir el id: dos tareas distintas con el
+mismo alcance son indistinguibles para él. Eso lo resuelve el Paso 1 del protocolo —buscar antes
+de crear, comparando **por significado** y no por coincidencia literal de título— y es
+responsabilidad del modelo, no del candado. Nadie debería creer que el candado lo cubre.
+
+### 8 bis. N tareas activas por proyecto, y por qué nada elige por defecto
 
 El estado guardaba **un** claim por proyecto, y eso no era una regla de trabajo: era el formato.
 La consecuencia se veía en el caso más normal que hay —dos sesiones de Claude Code en el mismo

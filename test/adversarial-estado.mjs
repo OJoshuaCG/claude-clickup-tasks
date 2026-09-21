@@ -64,7 +64,10 @@ for (const [label, raw] of [
     writeRawState(raw);
     const st = S.readState(PROJ);
     assert(st && typeof st === 'object', 'no devolvió objeto');
-    assert('claim' in st && 'exemption' in st, 'faltan las claves');
+    // `claims` en plural: el estado pasó a llevar N tareas por proyecto. Un archivo con el
+    // formato viejo se migra al leer, así que la clave vieja ya no existe ni siquiera acá.
+    assert('claims' in st && 'exemption' in st, 'faltan las claves');
+    assert(Array.isArray(st.claims), 'claims tiene que ser SIEMPRE una lista, aun degradando');
     // Y exemptionStatus tiene que tolerar lo que salga de ahí.
     const ex = S.exemptionStatus(st, 8);
     assert(typeof ex.active === 'boolean', 'active no es booleano');

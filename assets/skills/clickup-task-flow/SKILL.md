@@ -307,6 +307,13 @@ todos, y escribirla en el campo equivocado borra datos de otra gente). Al termin
 {{CLI}} release --task-id <id>
 ```
 
+**La unidad de exclusión es la TAREA, no el proyecto.** Dos sesiones sobre tareas distintas son
+trabajo en paralelo y no se estorban. Dos sobre la MISMA tarea es trabajo duplicado, y ahí `claim`
+se niega, dice quién la tiene y te manda a leer sus comentarios `INICIO`. Un claim sin señales de
+vida por más de 2 h deja de contar como que hay alguien encima. Y ojo: el candado solo compara
+**ids** — "el mismo propósito" con otro id lo tenés que ver vos en el Paso 1, comparando por
+significado.
+
 **El id va siempre.** Este proyecto puede llevar **varias tareas reclamadas a la vez** —dos
 sesiones en el mismo repo, o una sola con dos frentes— y conviven sin bloquearse: ninguna hay que
 pausar en `on hold` para empezar la otra. El precio es que con más de una activa, `release` sin id

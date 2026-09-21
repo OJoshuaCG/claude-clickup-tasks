@@ -31,6 +31,19 @@ Después cargá la skill `clickup-task-flow` y ejecutá el modo que corresponda.
 
 ---
 
+## La regla de fondo: la unidad es la TAREA, no el proyecto
+
+> **Dos sesiones sobre tareas distintas son trabajo en paralelo y nunca se estorban.**
+> **Dos sesiones sobre la misma tarea es trabajo duplicado, y eso sí frena.**
+
+Por eso `claim` se niega en un solo caso: esa misma tarea ya la tiene otra sesión y sigue dando
+señales de vida (menos de 2 h desde su última actividad). Ahí el comando te dice quién la tiene,
+te manda a leer sus comentarios `INICIO`, y la decisión es del usuario — no tuya.
+
+**Y el candado solo sabe de ids.** El criterio de verdad es "la misma tarea *o el mismo
+propósito*", y dos tareas distintas con el mismo alcance son indistinguibles para él. Eso lo cubre
+el Paso 1: buscar antes de crear, **comparando por significado**. No delegues eso en el candado.
+
 ## Varias tareas a la vez: se puede, y no hay que pausar ninguna
 
 **Este proyecto admite N tareas reclamadas al mismo tiempo**, sean de una sesión o de varias

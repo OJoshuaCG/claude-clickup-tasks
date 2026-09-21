@@ -47,6 +47,7 @@ import {
   rememberGitEmail,
   gitEmail,
   resolveProject,
+  effectiveDefaults,
   suggestFromOrg,
   DEFAULT_EXEMPTION_HOURS,
   MAX_EXEMPTION_HOURS,
@@ -61,6 +62,8 @@ import {
   activeClaims,
   findClaim,
   claimVerified,
+  claimStale,
+  claimActivityAt,
   setExemption,
   clearExemption,
   bindExemption,
@@ -877,9 +880,18 @@ function extractCanonicalName(payload, ids = []) {
   //
   // Se exige que haya EXACTAMENTE uno. Con varios no hay forma de saber a cuál pertenece el
   // nombre, y pegárselo al que no sería peor que no guardarlo.
+  // PRECEDENCIA, y la tuve al revés hasta que un test propio la cazó.
+  //
+  // La respuesta de `create_task` es AUTORITATIVA: dice cuál tarea se creó, y punto. La regla de
+  // "exactamente un id" es el respaldo para cuando esa respuesta no se puede leer a mano —el
+  // envoltorio MCP guarda el id adentro de un texto, y ahí `resp.task_id` es `undefined`—. Tenerlo
+  // al revés hacía que un id de más en la ENTRADA descartara la respuesta buena.
   const resp = objetoDe(payload?.tool_response);
   const bruto = crea
-    ? (ids.length === 1 ? ids[0] : (resp?.task_id ?? resp?.data?.task_id ?? resp?.task?.id))
+    ? (resp?.task_id ??
+       resp?.data?.task_id ??
+       resp?.task?.id ??
+       (ids.length === 1 ? ids[0] : null))
     : payload?.tool_input?.task_id;
   const taskId = bruto === undefined || bruto === null ? '' : String(bruto).trim();
   if (!taskId) return null;
@@ -1462,7 +1474,88 @@ function cmdClaim(args) {
     return 1;
   }
 
-  // ACÁ ESTABA EL RECHAZO, y su eliminación es el cambio que este rediseño vino a hacer.
+  // ───────────────────────────────────────────────────────────────────────────────────────
+  // LA ÚNICA COLISIÓN QUE AMERITA FRENAR: la misma tarea, otra sesión, todavía con vida.
+  //
+  // EL PRINCIPIO, porque gobierna todo este archivo: **la unidad de exclusión es LA TAREA, no el
+  // proyecto.** Dos sesiones sobre tareas DISTINTAS son trabajo en paralelo y no tienen por qué
+  // estorbarse — por eso el rechazo del segundo claim se eliminó, y por eso el hook `Stop` exige
+  // solo lo propio. Dos sesiones sobre LA MISMA tarea es trabajo duplicado, y eso es exactamente
+  // lo que el protocolo existe para evitar.
+  //
+  // Al quitar aquel rechazo se lo quitó también a este caso, y el resultado medido fue el peor
+  // posible: la segunda sesión se quedaba con la tarea EN SILENCIO y le pisaba el título. La
+  // primera no se enteraba nunca. Un rechazo demasiado ancho tapaba, de rebote, el único caso
+  // que sí había que frenar.
+  //
+  // TRES CONDICIONES, y las tres hacen falta:
+  //   · misma tarea  — distinto id no es colisión, es trabajo en paralelo.
+  //   · otra sesión  — reclamar lo propio dos veces es idempotente, no un conflicto.
+  //   · con vida     — sin señales por más de `claim_stale_hours`, el archivo dejó de ser prueba
+  //                    de que hay alguien. Tratarlo como persona sería tratar un timestamp viejo
+  //                    como un compañero.
+  //
+  // Si alguna de las dos sesiones no se puede identificar, NO se frena. No se puede demostrar que
+  // sea otra persona, y fallar cerrado ahí trabaría a alguien por no tener una variable de entorno.
+  //
+  // Y lo que el código NO puede hacer, que conviene que esté escrito: el usuario habló de "la
+  // misma tarea O EL MISMO PROPÓSITO". Acá solo se puede exigir el id. Dos tareas distintas con
+  // el mismo alcance son indistinguibles para un candado; eso lo resuelve el Paso 1 del protocolo
+  // —buscar antes de crear, comparando por SIGNIFICADO— y es responsabilidad del modelo.
+  // ───────────────────────────────────────────────────────────────────────────────────────
+  {
+    const estado = readState(cwd);
+    const previo = findClaim(estado, String(taskId));
+    const miSesion = sessionIdFrom();
+    const deOtro = Boolean(previo?.session && miSesion && previo.session !== miSesion);
+    const { entry } = resolveProject(config, cwd);
+    const horas = effectiveDefaults(config, entry).claim_stale_hours;
+    if (previo && deOtro && !claimStale(estado, previo, horas) && !args.force) {
+      const desde = claimActivityAt(estado, previo);
+      const edad = desde ? (Date.now() - Date.parse(desde)) / 60000 : null;
+      err(
+        [
+          `La tarea ${taskId} ya está reclamada por OTRA sesión en este proyecto.`,
+          '',
+          `  título:   ${previo.title ?? 's/título'}`,
+          `  quién:    ${previo.git_email ?? 's/email'}`,
+          `  reclamada: ${previo.claimed_at}`,
+          desde && edad !== null
+            ? `  última señal de vida: ${desde} (hace ${Math.round(edad)} min)`
+            : '  sin señales de vida registradas',
+          '',
+          'Dos sesiones sobre tareas DISTINTAS no se estorban, y esta herramienta no las frena.',
+          'Pero dos sobre LA MISMA tarea es trabajo duplicado, que es justo lo que el protocolo',
+          'existe para evitar.',
+          '',
+          'Antes de seguir, mirá quién la tiene y desde cuándo:',
+          '',
+          `    clickup_get_task_comments  task_id:"${taskId}"`,
+          '',
+          'Y planteale al usuario las tres salidas del protocolo — no es la misma tarea (creá una',
+          'nueva y vinculala), sí es la misma y la hace igual (sumate a los asignados y dejá un',
+          'comentario TRABAJO EN PARALELO), o no la hace. Decide el usuario, no vos.',
+          '',
+          `Si decide seguir igual:  ${cliInvocation(config)} claim --task-id ${taskId} --force`,
+          '',
+          `(Un claim sin señales por más de ${horas}h deja de contar como que hay alguien encima,`,
+          'y se puede tomar sin --force.)',
+        ]
+          .filter((l) => l !== null)
+          .join('\n'),
+      );
+      return 1;
+    }
+    if (previo && deOtro && args.force) {
+      say(`⚠ Tomando por --force una tarea que tenía OTRA sesión: ${previo.title ?? 's/título'}.`);
+      say('  Dejá el comentario TRABAJO EN PARALELO en ClickUp, o la otra persona lo descubre en el merge.');
+    } else if (previo && deOtro) {
+      say(`⚠ Esta tarea la tenía otra sesión (${previo.git_email ?? 's/email'}), sin señales por más de ${horas}h.`);
+      say('  Se toma igual. Si esa persona sigue en esto, coordinalo antes de escribir.');
+    }
+  }
+
+  // ACÁ ESTABA EL RECHAZO ANCHO, y su eliminación es el cambio que este rediseño vino a hacer.
   //
   // Antes, una segunda tarea en el mismo proyecto fallaba pidiendo cerrar la anterior o pausarla
   // en `on hold`. El motivo original era real —dos sesiones se pisaban el ÚNICO claim que cabía

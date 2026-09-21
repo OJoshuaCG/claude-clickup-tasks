@@ -21,6 +21,14 @@ import path from 'node:path';
 import { execFileSync, spawnSync } from 'node:child_process';
 import { fileURLToPath } from 'node:url';
 
+// El número de hooks NO se escribe a mano.
+//
+// Estaba puesto a mano y quedó desfasado en silencio: los tests decían 3 cuando el producto ya
+// instalaba 6, y nadie se enteró hasta que alguien corrió el suite completo. Un test que afirma
+// un número viejo no falla ruidosamente: falla siempre, y se aprende a ignorarlo.
+import { HOOK_COUNT } from '../src/lib/settings.mjs';
+
+
 const HERE = path.dirname(fileURLToPath(import.meta.url));
 const REPO = path.resolve(HERE, '..');
 
@@ -160,7 +168,7 @@ check('reinstalar informa que es una reinstalación, no un update', () => {
 });
 
 check('reinstalar no duplica hooks', () => {
-  assert(ourHookCount() === 3, `hay ${ourHookCount()} hooks nuestros en vez de 3`);
+  assert(ourHookCount() === HOOK_COUNT, `hay ${ourHookCount()} hooks nuestros en vez de ${HOOK_COUNT}`);
 });
 
 check('reinstalar conserva proyectos, identidad y equipo', () => {
@@ -253,7 +261,7 @@ check('actualizar conserva proyectos, identidad y equipo', () => {
 
 check('actualizar sigue sin tocar nada del usuario', () => {
   const s = readSettings();
-  assert(ourHookCount() === 3, `hay ${ourHookCount()} hooks nuestros`);
+  assert(ourHookCount() === HOOK_COUNT, `hay ${ourHookCount()} hooks nuestros`);
   assert(JSON.stringify(s.hooks).includes('mi-hook-personal'), 'perdió el hook del usuario');
   assert(commands().includes('mi-comando.md'), 'borró un comando del usuario');
   assert(skills().includes('mi-skill'), 'borró una skill del usuario');
@@ -294,7 +302,7 @@ check('la desinstalación realmente hace algo', () => {
   assert(out4.includes('hook(s)'), 'no informa haber quitado los hooks');
 });
 
-check('quita los tres hooks y deja los del usuario', () => {
+check('quita TODOS sus hooks y deja los del usuario', () => {
   assert(ourHookCount() === 0, `quedaron ${ourHookCount()} hooks nuestros`);
   assert(
     JSON.stringify(readSettings().hooks ?? {}).includes('mi-hook-personal'),
@@ -348,7 +356,7 @@ check('reinstalar recupera el estado completo', () => {
   const cfg = readConfig();
   assert(Object.keys(cfg.projects).length === 1, 'no recuperó el proyecto');
   assert(cfg.identity.clickup_user_id === '5000000001', 'no recuperó la identidad');
-  assert(ourHookCount() === 3, 'no volvieron los hooks');
+  assert(ourHookCount() === HOOK_COUNT, 'no volvieron los hooks');
   assert(commands().includes('tarea.md'), 'no volvió /tarea');
 });
 
@@ -437,7 +445,7 @@ check('un archivo viejo del motor que NO se puede borrar no aborta la instalaci�
   );
   const s = JSON.parse(fs.readFileSync(path.join(fc, 'settings.json'), 'utf8'));
   const refs = (JSON.stringify(s.hooks || {}).match(/cli\.mjs/g) || []).length;
-  assert(refs === 3, `los hooks no quedaron registrados: ${refs} referencias`);
+  assert(refs === HOOK_COUNT, `los hooks no quedaron registrados: ${refs} referencias`);
   assert(/no se pudieron borrar/i.test(r), `no avisó del archivo que no pudo borrar:\n${r.slice(-400)}`);
   fs.rmSync(c, { recursive: true, force: true });
 });

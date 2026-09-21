@@ -93,7 +93,7 @@ for (const [label, obj] of MALFORMED) {
   check(`removeHooks sobrevive: ${label}`, () => {
     const { settings } = readSettings();
     const removed = removeHooks(settings);
-    assert(removed === 3, `quitó ${removed} en vez de 3`);
+    assert(removed === HOOK_COUNT, `quitó ${removed} en vez de ${HOOK_COUNT}`);
     assert(ours(settings) === 0, 'quedaron hooks nuestros');
     assert(settings.model === 'opus', 'perdió una clave del usuario');
   });
@@ -143,7 +143,8 @@ check('unmergePermissions no toca los permisos del usuario', () => {
   const { settings } = readSettings();
   mergePermissions(settings);
   const n = unmergePermissions(settings);
-  assert(n === 11, `quitó ${n} en vez de 11`);
+  // 8 permisos del usuario + los nuestros. El total sale del producto, no de un número copiado.
+  assert(n === 11 - 3 + HOOK_COUNT, `quitó ${n} en vez de ${11 - 3 + HOOK_COUNT}`);
   assert(settings.permissions.allow.includes('mcp__mio__*'), 'perdió un allow del usuario');
   assert(settings.permissions.allow.includes('Bash(ls)'), 'perdió otro allow del usuario');
   assert(settings.permissions.deny.includes('Read(.env)'), 'perdió un deny del usuario');

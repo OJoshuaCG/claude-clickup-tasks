@@ -317,6 +317,110 @@ check('`release --all` limpia todo de una', () => {
   assert(ids().length === 0, 'quedaron claims');
 });
 
+console.log('\nLA UNIDAD DE EXCLUSIÓN ES LA TAREA, NO EL PROYECTO\n');
+
+// EL PRINCIPIO QUE GOBIERNA TODO ESTE SUITE, dicho una vez:
+//
+//   Dos sesiones sobre tareas DISTINTAS son trabajo en paralelo y nunca deben estorbarse.
+//   Dos sesiones sobre LA MISMA tarea es trabajo duplicado, y eso es lo único que amerita frenar.
+//
+// El diseño viejo trataba el PROYECTO como la unidad, y de ahí salían sus dos defectos: rechazaba
+// el segundo claim y el hook `Stop` bloqueaba cruzado. Al corregirlo se abrió el agujero opuesto
+// —la misma tarea se podía tomar en silencio— y esta sección lo cierra.
+
+check('la MISMA tarea desde OTRA sesión se rechaza: eso es trabajo duplicado', () => {
+  limpiar();
+  cli(['claim', '--task-id', 'COMPARTIDA-1', '--title', 'lo hago yo'], { session: 'sesion-a' });
+  const r = cli(['claim', '--task-id', 'COMPARTIDA-1', '--title', 'y yo'], { session: 'sesion-b' });
+  assert(r.code === 1, `aceptó que dos sesiones tomaran la misma tarea (exit ${r.code})`);
+  assert(/OTRA sesión/.test(r.err), 'no dice que la tiene otra sesión');
+  assert(/--force/.test(r.err), 'no ofrece la salida documentada');
+  assert(/clickup_get_task_comments/.test(r.err), 'no manda a leer quién la tiene');
+  // Y lo más importante: NO le pisó el título al primero.
+  const c = S.findClaim(S.readState(PROJ), 'COMPARTIDA-1');
+  assert(c.title === 'lo hago yo', `le pisó el claim al primero: "${c.title}"`);
+  assert(c.session === 'sesion-a', 'le cambió el dueño');
+});
+
+check('una tarea DISTINTA desde otra sesión no frena jamás', () => {
+  limpiar();
+  cli(['claim', '--task-id', 'MIA-1'], { session: 'sesion-a' });
+  const r = cli(['claim', '--task-id', 'TUYA-2'], { session: 'sesion-b' });
+  assert(r.code === 0, `frenó trabajo en paralelo legítimo: ${r.err.slice(0, 200)}`);
+  assert(ids().join(',') === 'MIA-1,TUYA-2', 'no conviven');
+});
+
+check('la misma sesión reclamando su propia tarea sigue siendo idempotente', () => {
+  limpiar();
+  cli(['claim', '--task-id', 'MIA-1', '--title', 'v1'], { session: 'sesion-a' });
+  const r = cli(['claim', '--task-id', 'MIA-1', '--title', 'v2'], { session: 'sesion-a' });
+  assert(r.code === 0, 'se rechazó a sí misma');
+  assert(S.findClaim(S.readState(PROJ), 'MIA-1').title === 'v2', 'no actualizó');
+});
+
+check('sin poder identificar las sesiones NO se frena: fallar abierto', () => {
+  limpiar();
+  // Sin `CLAUDE_CODE_SESSION_ID` no se puede demostrar que sea otra persona, y trabar a alguien
+  // por no tener una variable de entorno sería el peor intercambio posible.
+  cli(['claim', '--task-id', 'COMPARTIDA-1', '--title', 'uno']);
+  const r = cli(['claim', '--task-id', 'COMPARTIDA-1', '--title', 'dos']);
+  assert(r.code === 0, 'frenó sin poder demostrar que fueran sesiones distintas');
+});
+
+check('`--force` toma la tarea igual, pero lo dice fuerte', () => {
+  limpiar();
+  cli(['claim', '--task-id', 'COMPARTIDA-1', '--title', 'lo hago yo'], { session: 'sesion-a' });
+  const r = cli(['claim', '--task-id', 'COMPARTIDA-1', '--title', 'la tomo igual', '--force'], {
+    session: 'sesion-b',
+  });
+  assert(r.code === 0, 'ni con --force dejó');
+  assert(/TRABAJO EN PARALELO/.test(r.out), 'no exige el comentario que avisa a la otra persona');
+});
+
+console.log('\nEL VENCIMIENTO: DEJAR DE TRATAR UN TIMESTAMP VIEJO COMO UNA PERSONA\n');
+
+const HACE = (h) => new Date(Date.now() - h * 3_600_000).toISOString();
+
+check('un claim sin señales por más del límite deja de contar como que hay alguien', () => {
+  const viejo = { task_id: 'X-1', claimed_at: HACE(5) };
+  assert(S.claimStale({ mcp: { writes: [] } }, viejo, 2), 'a las 5h con límite 2 seguía "vivo"');
+  assert(!S.claimStale({ mcp: { writes: [] } }, { task_id: 'X-1', claimed_at: HACE(1) }, 2),
+    'declaró vencido un claim de hace una hora');
+});
+
+check('la ACTIVIDAD rejuvenece el claim, no solo la fecha en que se reclamó', () => {
+  // Quien está trabajando de verdad comenta el avance y mueve el estado. Cada una de esas
+  // llamadas es prueba de que sigue ahí. Vencer por `claimed_at` a secas habría declarado
+  // abandonada una tarea con actividad de hace un minuto.
+  const viejo = { task_id: 'X-1', claimed_at: HACE(5) };
+  const conVida = { mcp: { writes: [{ task_id: 'X-1', at: HACE(0.1) }] } };
+  assert(!S.claimStale(conVida, viejo, 2), 'lo venció pese a una mutación de hace 6 minutos');
+});
+
+check('la actividad de OTRA tarea no rejuvenece esta', () => {
+  const viejo = { task_id: 'X-1', claimed_at: HACE(5) };
+  const ajena = { mcp: { writes: [{ task_id: 'OTRA-9', at: HACE(0.1) }] } };
+  assert(S.claimStale(ajena, viejo, 2), 'la actividad de otra tarea lo mantuvo vivo');
+});
+
+check('una fecha ilegible se considera vencida, no eterna', () => {
+  // Fallar para este lado pierde la protección contra pisar a alguien que probablemente ya no
+  // está. Fallar para el otro trabaría una tarea PARA SIEMPRE por un timestamp roto.
+  assert(S.claimStale({ mcp: { writes: [] } }, { task_id: 'X-1', claimed_at: 'ayer' }, 2), 'no venció');
+});
+
+check('vencido, se toma sin --force y avisando', () => {
+  limpiar();
+  cli(['config', 'set', '--key', 'defaults.claim_stale_hours', '--value', '0.00001']);
+  cli(['claim', '--task-id', 'COMPARTIDA-1', '--title', 'la tenía yo'], { session: 'sesion-a' });
+  const r = cli(['claim', '--task-id', 'COMPARTIDA-1', '--title', 'parece abandonada'], {
+    session: 'sesion-b',
+  });
+  cli(['config', 'set', '--key', 'defaults.claim_stale_hours', '--value', '2']);
+  assert(r.code === 0, `no dejó tomar una tarea vencida: ${r.err.slice(0, 200)}`);
+  assert(/sin señales/.test(r.out), 'la tomó en silencio, sin decir que era de otro');
+});
+
 console.log('\nEL CANDADO Y EL HOOK STOP\n');
 
 check('cualquier tarea activa abre el candado de escritura', () => {

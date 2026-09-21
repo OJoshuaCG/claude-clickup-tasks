@@ -55,6 +55,26 @@ export const DEFAULT_EXEMPTION_HOURS = 0.5;
 export const MAX_EXEMPTION_HOURS = 8;
 
 /**
+ * Cuánto dura un claim como evidencia de que alguien está ENCIMA de esa tarea.
+ *
+ * QUÉ DECIDE ESTE NÚMERO, que no es lo que parece. No vence la tarea ni suelta el claim: decide
+ * hasta cuándo reclamar esa MISMA tarea desde otra sesión cuenta como trabajo duplicado. Pasadas
+ * las dos horas sin una sola señal de vida, seguir tratándolo como "hay alguien trabajándolo"
+ * sería tratar un archivo viejo como una persona.
+ *
+ * SE MIDE DESDE LA ÚLTIMA ACTIVIDAD, no desde que se reclamó. La última mutación MCP registrada
+ * sobre esa tarea cuenta como señal de vida, así que quien está trabajando de verdad —comentando
+ * el avance, moviendo el estado— nunca se vuelve obsoleto. Vencer por el reloj del claim habría
+ * declarado abandonada una tarea con actividad de hace un minuto.
+ *
+ * Y NO BLOQUEA NADA. Un claim vencido no cierra el candado ni le exige nada a nadie: lo único que
+ * cambia es que tomar esa tarea deja de necesitar `--force`. La única cosa que frena en todo este
+ * mecanismo es la colisión real —misma tarea, otra sesión, todavía con vida—, y esa frena porque
+ * es trabajo duplicado, no porque el archivo diga algo.
+ */
+export const DEFAULT_CLAIM_STALE_HOURS = 2;
+
+/**
  * Modes a project can be in.
  *
  * `excluded` is a real, recorded answer — not the absence of one. `pending` es la distinción que
@@ -289,6 +309,7 @@ export function defaultConfig() {
       block_writes_without_task: true,
       // Ver DEFAULT_EXEMPTION_HOURS arriba: media hora, y el porqué del cambio desde 8.
       exemption_hours: DEFAULT_EXEMPTION_HOURS,
+      claim_stale_hours: DEFAULT_CLAIM_STALE_HOURS,
       // ¿Preguntar en un proyecto que nunca vimos? Es LA palanca que el usuario pidió: un
       // registro global que sepa qué proyectos aceptaron y cuáles no, y que pregunte por los
       // que faltan. Se pregunta una vez, en la primera escritura, con tres salidas — adoptar,
@@ -810,6 +831,9 @@ export const OVERRIDABLE = Object.freeze([
   'auto_assign',
   'end_date_field',
   'search_window_days',
+  // Por proyecto: un repo donde las tareas duran media hora y otro donde una migración lleva
+  // dos días no pueden compartir la ventana de "alguien está encima de esto".
+  'claim_stale_hours',
   // Por proyecto y no global: en un mismo equipo conviven el repo del cliente que se factura por
   // hora y la herramienta interna donde registrar tiempo es puro ruido. Una respuesta global
   // tendría que estar mal en uno de los dos.
