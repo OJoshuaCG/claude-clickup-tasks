@@ -83,7 +83,7 @@ nadie lo validó.
 | `search_window_days` | Cuántos días hacia atrás se buscan las tareas **cerradas**. `0` = sin límite |
 | `track_time` | Usar el cronómetro de ClickUp. **Apagado por default** — ver abajo |
 | `block_writes_without_task` | El candado `PreToolUse` |
-| `exemption_hours` | Cuánto dura una exención antes de vencer |
+| `exemption_hours` | Cuánto dura una exención antes de vencer (default 0.5 = 30 min, techo 8) |
 
 ```bash
 {{CLI}} config set --key defaults.<campo> --value <valor>

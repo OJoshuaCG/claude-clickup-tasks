@@ -27,7 +27,14 @@ import {
   forwardSlash,
   cliInvocation,
 } from './lib/paths.mjs';
-import { loadConfig, saveConfig, defaultConfig, MODES } from './lib/config.mjs';
+import {
+  loadConfig,
+  saveConfig,
+  defaultConfig,
+  MODES,
+  DEFAULT_EXEMPTION_HOURS,
+  MAX_EXEMPTION_HOURS,
+} from './lib/config.mjs';
 import {
   readSettings,
   writeSettings,
@@ -382,7 +389,9 @@ async function interview(prompt, existing) {
   //
   // Ahora abre por lo que el usuario va a ver, define los dos términos donde se usan, y el
   // mecanismo baja a una nota al pie para quien le interese.
-  const horasExencion = existing?.defaults?.exemption_hours ?? 8;
+  const horasExencion = existing?.defaults?.exemption_hours ?? DEFAULT_EXEMPTION_HOURS;
+  const duracionExencion =
+    horasExencion < 1 ? `${Math.round(horasExencion * 60)} minutos` : `${horasExencion}h`;
   box(
     'Qué vas a ver cuando esté activo',
     [
@@ -401,9 +410,14 @@ async function interview(prompt, existing) {
       '  DECLARAR UNA EXENCIÓN',
       '  Este cambio no amerita tarea, y queda escrito el motivo. Sirve para',
       '  un typo, un ajuste del entorno local, o algo pedido dentro de un',
-      `  trabajo que ya reclamaste. Vence sola a las ${horasExencion}h, a propósito: una`,
-      '  exención olvidada dejaría el candado abierto para siempre y sin que',
-      '  nadie se entere.',
+      '  trabajo que ya reclamaste.',
+      '',
+      '  Cubre ESE trabajo y esta sesión, no el resto del día. Se vence sola',
+      `  a los ${duracionExencion} y no la hereda la sesión siguiente, que la vuelve`,
+      '  a declarar si le corresponde. Las dos cosas por lo mismo: una',
+      '  exención que dura de más deja de significar "permiso para esto" y',
+      `  pasa a significar "permiso para hoy". Si de verdad necesitás una`,
+      `  ventana larga, pedila explícita con --hours N (techo: ${MAX_EXEMPTION_HOURS}h).`,
       '',
       'NO frena leer, buscar, investigar ni responder. Solo escribir.',
       'NO existe en las carpetas que no configures: ahí no hace nada.',

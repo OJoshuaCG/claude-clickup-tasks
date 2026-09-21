@@ -66,7 +66,7 @@ fs.writeFileSync(
         block_writes_without_task: true,
         ask_new_projects: true,
         snooze_days: 7,
-        exemption_hours: 8,
+        exemption_hours: 0.5,
       },
       projects: {
         [ACTIVO]: {

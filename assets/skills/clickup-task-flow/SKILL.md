@@ -95,9 +95,21 @@ va a frenar:
 {{CLI}} exempt --reason "<motivo concreto>"
 ```
 
-La exención **vence sola**, a propósito: una exención olvidada desactivaría el candado para
-siempre y en silencio, que es justo el modo de fallo que el candado existe para evitar. Y **no es
-un atajo para saltearse la búsqueda** — usarla para eso es exactamente lo que produce duplicados.
+La exención cubre **ese motivo y esta sesión**, y nada más. Dos límites:
+
+- **No la hereda la sesión siguiente.** Si arrancás una sesión y hay una exención vigente que
+  declaró otra, leé el motivo y comparalo con lo que te acaban de pedir. Si es lo mismo,
+  re-declarala con el motivo actual. Si es otra cosa —y casi siempre lo es— reclamá tarea. Un
+  permiso emitido para un trabajo no vale para el que viene después.
+- **Vence sola** a los 30 minutos (`--hours N` para un caso largo y explícito, con techo de 8h).
+  Una exención olvidada desactivaría el candado para siempre y en silencio, que es justo el modo
+  de fallo que el candado existe para evitar.
+
+Cuando el mensaje del candado te muestre un motivo, **el motivo es la pregunta, no el permiso**:
+"¿lo que estoy por hacer es esto?". Si la respuesta es no, la exención no te cubre.
+
+Y **no es un atajo para saltearse la búsqueda** — usarla para eso es exactamente lo que produce
+duplicados.
 
 ## Identidad: son DOS cosas distintas y conviene tenerlo claro
 
@@ -180,8 +192,9 @@ cerrar. Tres reglas que no cambian:
 - **Un solo reloj corriendo por persona.** Arrancar uno con otro andando **falla**. No reintentes:
   preguntá, porque parar el anterior cierra la entrada de tiempo de otro trabajo.
 - **Se para ANTES de cerrar la tarea**, no después. Por eso `{{CLI}} release` se niega a soltar el
-  claim con el reloj corriendo: un cronómetro olvidado sobre una tarea ya cerrada suma horas toda
-  la noche y nadie las corrige.
+  claim con el reloj corriendo **sobre esa misma tarea**: un cronómetro olvidado sobre una tarea ya
+  cerrada suma horas toda la noche y nadie las corrige. El reloj de OTRA tarea activa no traba el
+  cierre — es trabajo en curso, y pedirte que lo interrumpas para cerrar otra cosa sería absurdo.
 - **Si te retirás a mitad, el reloj se para igual.** `on hold` con el reloj andando es la misma
   trampa, disimulada por días.
 
@@ -291,8 +304,13 @@ tiene "crear si no existe" atómico), solo se puede detectar. Volvé a buscar de
 todos, y escribirla en el campo equivocado borra datos de otra gente). Al terminar:
 
 ```bash
-{{CLI}} release
+{{CLI}} release --task-id <id>
 ```
+
+**El id va siempre.** Este proyecto puede llevar **varias tareas reclamadas a la vez** —dos
+sesiones en el mismo repo, o una sola con dos frentes— y conviven sin bloquearse: ninguna hay que
+pausar en `on hold` para empezar la otra. El precio es que con más de una activa, `release` sin id
+**no elige ninguna**: falla y te las lista. Con una sola, el id sigue siendo opcional.
 
 **Si se abandona a mitad, nunca se deja en `in progress`.** Pasa a `on hold` con un comentario que
 diga **dónde quedó**. Una tarea colgada en `in progress` bloquea a todos los demás por nada.
@@ -348,7 +366,9 @@ gestionan tareas — no espera a que alguien se acuerde de ofrecer `/clickup-set
 **2. `PostToolUse` — la evidencia no la ponés vos.**
 Cada llamada de escritura al MCP de ClickUp queda registrada leyendo el **resultado real** de la
 herramienta. Un claim no está verificado porque lo digas: está verificado porque el harness vio
-la mutación. Por eso `release` rechaza soltar una tarea sobre la que no hay ninguna.
+la mutación. Por eso `release` rechaza soltar una tarea sobre la que no hay ninguna. Y la
+evidencia se ata por `task_id`: con varias tareas activas, un comentario en una **no** puede
+marcar verificada a otra.
 
 **3. `PreToolUse` del tiempo — no se cargan horas a nombre de otro.**
 Cancela `clickup_start_time_tracking` y `clickup_add_time_entry` mientras no esté probado que el

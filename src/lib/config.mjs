@@ -19,7 +19,40 @@ import {
   writeJsonAtomic,
 } from './paths.mjs';
 
-export const CONFIG_VERSION = 1;
+// v2 bajó `defaults.exemption_hours` de 8 a 0.5. Ver `migrate()`: el número vive en un solo lugar
+// y el archivo que ya tenía el viejo escrito se corrige solo.
+export const CONFIG_VERSION = 2;
+
+/**
+ * Cuánto dura una exención que nadie acotó a mano.
+ *
+ * ERA 8 HORAS, y ese número produjo el incidente que este valor existe para no repetir: una
+ * exención declarada a las 13:47 para "generar los commits de trabajo ya cerrado" seguía vigente
+ * a las 20:20, cuando otra sesión escribió un breaking change en 43 archivos y el candado la dejó
+ * pasar. Ocho horas no son "permiso para esta tarea puntual": son permiso para la jornada.
+ *
+ * MEDIA HORA, y no menos, por la asimetría de costos. Vencer corto de más cuesta un comando de
+ * cinco segundos, y encima produce un motivo FRESCO — que es exactamente lo que se quiere. Vencer
+ * largo de más cuesta un cambio desplegable sin tarea en el tablero. Ante costos así de
+ * disparejos se erra corto. Pero no tanto como para cortar al medio el caso legítimo (arreglar un
+ * typo y commitearlo), porque una ventana que molesta se esquiva con `--hours 8` de puro fastidio
+ * y ahí se perdió el mecanismo entero.
+ *
+ * Y ES UN BACKSTOP, no la frontera. Lo que cierra el agujero es que la exención se ate a la
+ * sesión que la usa — ver `bindExemption` en state.mjs. La duración sólo acota el daño de una
+ * exención olvidada, y de una instalación donde el harness no expone `session_id`.
+ */
+export const DEFAULT_EXEMPTION_HOURS = 0.5;
+
+/**
+ * Techo duro de `exempt --hours`.
+ *
+ * Sin esto, `exempt --hours 99999` deja el candado abierto once años, en silencio y sin que nada
+ * lo vuelva a preguntar. Bajar el default y dejar la salida de emergencia sin techo no cierra el
+ * agujero: lo muda. Por encima de este techo la respuesta correcta no es una exención más larga,
+ * es una tarea.
+ */
+export const MAX_EXEMPTION_HOURS = 8;
 
 /**
  * Modes a project can be in.
@@ -254,7 +287,8 @@ export function defaultConfig() {
       search_window_days: 30,
       // The PreToolUse lock. Only ever applies to registered, non-excluded projects.
       block_writes_without_task: true,
-      exemption_hours: 8,
+      // Ver DEFAULT_EXEMPTION_HOURS arriba: media hora, y el porqué del cambio desde 8.
+      exemption_hours: DEFAULT_EXEMPTION_HOURS,
       // ¿Preguntar en un proyecto que nunca vimos? Es LA palanca que el usuario pidió: un
       // registro global que sepa qué proyectos aceptaron y cuáles no, y que pregunte por los
       // que faltan. Se pregunta una vez, en la primera escritura, con tres salidas — adoptar,
@@ -316,13 +350,17 @@ export function loadConfig() {
     // `isPlainObject`, no `typeof === 'object'`: un `[]` en la raíz pasaba la validación anterior
     // y después `config.projects` era `undefined` en un lugar muy lejano al archivo.
     if (!isPlainObject(parsed)) throw new Error('la raíz del config no es un objeto');
+    // La versión que traía EL ARCHIVO, capturada antes de que `fillDefaults` o el sello de más
+    // abajo la pisen. Sin esto la migración nunca se enteraría de que hay algo que migrar.
+    const desdeVersion = Number(parsed.version) || 0;
     const { config, arreglado } = normalise(fillDefaults(parsed, defaultConfig()));
+    const migrado = migrate(config, desdeVersion);
     config.version = CONFIG_VERSION;
     BASELINE.set(config, structuredClone(config));
     // `normalised` viaja hasta `doctor`: corregir una contradicción en silencio la arregla pero
     // la vuelve invisible, y la queja original era justamente que el sistema NO la detectaba.
     // Se arregla Y se dice.
-    return { config, ok: true, existed: true, error: null, normalised: arreglado };
+    return { config, ok: true, existed: true, error: null, normalised: [...arreglado, ...migrado] };
   } catch (err) {
     return {
       config: defaultConfig(),
@@ -346,6 +384,41 @@ export function loadConfig() {
  * dos sin notar el conflicto. `pending_query` es el dato que el instalador deja para que la
  * primera sesión resuelva la identidad; una vez confirmada, no significa nada.
  */
+/**
+ * Migraciones versionadas del archivo de config.
+ *
+ * POR QUÉ EXISTE, y es un error que estuvo a punto de shippearse. `fillDefaults` sólo rellena
+ * claves AUSENTES, y está bien que así sea: un default no puede pisar una decisión del usuario.
+ * Pero eso significa que cambiar un default de fábrica NO CAMBIA NADA en ninguna instalación
+ * existente, porque el valor viejo ya está escrito literal en el archivo. Sin este paso, bajar
+ * `exemption_hours` de 8 a 0.5 es un no-op exactamente en las máquinas donde el problema ocurre,
+ * y lo único que se shippea es la sensación de haberlo arreglado.
+ *
+ * SÓLO SE TOCA lo que sigue teniendo EXACTAMENTE el default de fábrica anterior. Quien puso 3
+ * eligió 3, y una migración que le pisa la elección es un bug con buenas intenciones.
+ *
+ * NO ESCRIBE. Igual que `normalise`, corrige en memoria y la corrección llega al disco cuando
+ * algo guarde por su cuenta. Leer no puede tener efectos: los hooks leen en cada llamada a cada
+ * herramienta, y una migración que escribe en cada lectura es una tormenta de escrituras.
+ *
+ * Devuelve las notas que viajan hasta `doctor`: se arregla Y se dice.
+ */
+function migrate(config, desdeVersion) {
+  const notas = [];
+  if (desdeVersion < 2) {
+    const d = config?.defaults;
+    if (isPlainObject(d) && d.exemption_hours === 8) {
+      d.exemption_hours = DEFAULT_EXEMPTION_HOURS;
+      notas.push(
+        `defaults.exemption_hours pasó de 8 a ${DEFAULT_EXEMPTION_HOURS} (config v2): ocho horas ` +
+          'es una jornada entera, no una tarea puntual. Un caso largo se pide explícito con ' +
+          '`exempt --hours N` y queda registrado.',
+      );
+    }
+  }
+  return notas;
+}
+
 function normalise(config) {
   const arreglado = [];
   if (config?.identity?.confirmed && config.identity.pending_query) {
@@ -487,7 +560,11 @@ function loadConfigSinBaseline() {
   try {
     const parsed = JSON.parse(fs.readFileSync(file, 'utf8'));
     if (!isPlainObject(parsed)) throw new Error('la raíz del config no es un objeto');
+    const desdeVersion = Number(parsed.version) || 0;
     const { config } = normalise(fillDefaults(parsed, defaultConfig()));
+    // Migrar acá también, y no es redundante: `saveConfig` reconcilia contra ESTA lectura, así
+    // que es por acá por donde la migración termina llegando al disco.
+    migrate(config, desdeVersion);
     config.version = CONFIG_VERSION;
     return { config, ok: true, existed: true };
   } catch {

@@ -27,6 +27,7 @@ import {
   toolHome,
   statePath,
   projectRelative,
+  cliInvocation,
 } from './lib/paths.mjs';
 import { detectBashWrites } from './lib/bash-writes.mjs';
 import {
@@ -47,13 +48,23 @@ import {
   gitEmail,
   resolveProject,
   suggestFromOrg,
+  DEFAULT_EXEMPTION_HOURS,
+  MAX_EXEMPTION_HOURS,
 } from './lib/config.mjs';
 import {
   readState,
-  setClaim,
-  clearClaim,
+  addClaim,
+  removeClaim,
+  recordTaskName,
+  claimNameMismatch,
+  clearAllClaims,
+  activeClaims,
+  findClaim,
+  claimVerified,
   setExemption,
   clearExemption,
+  bindExemption,
+  clampExemptionHours,
   dropState,
   listStateFiles,
   recordMcpWrite,
@@ -70,7 +81,13 @@ import {
   bumpStopBlocks,
   resetStopBlocks,
 } from './lib/state.mjs';
-import { buildContext, renderContext, shortSummary } from './lib/protocol.mjs';
+import {
+  buildContext,
+  renderContext,
+  shortSummary,
+  restante,
+  duracionHoras,
+} from './lib/protocol.mjs';
 import { readSettings, inspectInstalled, HOOK_COUNT, MCP_TIME_TOOLS } from './lib/settings.mjs';
 import { scanProject, importUsers } from './lib/migrate.mjs';
 
@@ -158,6 +175,29 @@ async function readHookInput(timeoutMs = 2000) {
   });
 }
 
+/**
+ * La sesión en la que estamos, por las dos vías que existen.
+ *
+ * DOS FUENTES, y ninguna hubo que inventarla:
+ *
+ *   `payload.session_id`         — el harness se lo pasa a TODOS los hooks por stdin. El código
+ *                                  ya lo venía usando en `bumpStopBlocks` y en la llave de
+ *                                  "omitir" del guard.
+ *   `CLAUDE_CODE_SESSION_ID`     — variable de entorno del Bash donde corren los comandos del
+ *                                  CLI. Es un id de primera clase: le corresponde un transcript
+ *                                  en `~/.claude/projects/<proyecto>/<id>.jsonl`.
+ *
+ * `null` cuando no hay ninguna, que es un estado legítimo (harness viejo, ejecución a mano desde
+ * una terminal común) y NO se trata como error. Quien compara decide qué hacer con eso — ver la
+ * degradación en escalera de `exemptionStatus`.
+ */
+function sessionIdFrom(payload) {
+  const delHook = String(payload?.session_id ?? '').trim();
+  if (delHook) return delHook;
+  const delEntorno = String(process.env.CLAUDE_CODE_SESSION_ID ?? '').trim();
+  return delEntorno || null;
+}
+
 /** Best available project directory, in order of trustworthiness. */
 function hookCwd(payload) {
   return canonicalProjectKey(
@@ -184,7 +224,7 @@ async function cmdSessionStart() {
     return 0;
   }
 
-  const ctx = buildContext(config, cwd);
+  const ctx = buildContext(config, cwd, sessionIdFrom(payload));
 
   // Silence is the correct output for a project the user excluded. Anything else re-litigates a
   // decision they already made, every single session.
@@ -248,13 +288,44 @@ async function cmdSessionStart() {
     );
   }
 
-  if (ctx.claim) {
+  if (ctx.claims.length === 1) {
+    const c = ctx.claims[0];
     lines.push(
-      `TAREA EN CURSO: ${ctx.claim.task_id} — ${ctx.claim.title ?? 's/título'}. ` +
-        `Al terminar, /tarea fin ${ctx.claim.task_id}.`,
+      `TAREA EN CURSO: ${c.task_id} — ${c.title ?? 's/título'}. ` +
+        // Este es EL momento en que la divergencia importa: una sesión que arranca y ve un claim
+        // cuyo título no reconoce contra el tablero. Sin esta línea, deducir "estado viejo" y
+        // soltarlo es un paso razonable — y produce el incidente que esto viene a evitar.
+        (claimNameMismatch(c) ? `En ClickUp se llama "${c.clickup_name}". ` : '') +
+        `Al terminar, /tarea fin ${c.task_id}.`,
+    );
+  } else if (ctx.claims.length > 1) {
+    // Con varias activas, el dato que hay que dar no es cuáles hay: es que hace falta el id.
+    // Una sesión que abre viendo dos tareas y no lee esto va a cerrar la que recuerde.
+    lines.push(
+      `${ctx.claims.length} TAREAS EN CURSO a la vez (conviven, ninguna bloquea a la otra): ` +
+        ctx.claims.map((c) => `${c.task_id} — ${c.title ?? 's/título'}`).join(' · ') +
+        '. Al cerrar o comentar, NOMBRÁ EL ID: /tarea fin <id>. Sin id no se elige ninguna, ' +
+        'a propósito.',
     );
   } else if (ctx.exemption.active) {
-    lines.push(`Exención vigente (${ctx.exemption.reason}). Se puede escribir sin tarea.`);
+    // ESTA LÍNEA DECÍA "Exención vigente (...). Se puede escribir sin tarea." y esa redacción
+    // participó de un incidente real: una sesión la leyó como luz verde y escribió un breaking
+    // change en 43 archivos bajo una exención que hablaba de commitear trabajo ya cerrado.
+    //
+    // El defecto es de orden. La conclusión ("se puede escribir sin tarea") venía en la misma
+    // respiración que el motivo, incondicional, y nada empujaba a comparar una cosa con la otra.
+    // Ahora el motivo va primero y la conclusión es una CONDICIÓN, no un permiso.
+    lines.push(
+      `HAY UNA EXENCIÓN DECLARADA PARA ESTO: "${ctx.exemption.reason}" (le quedan ` +
+        `${restante(ctx.exemption)}). Si lo que te van a pedir NO es eso, la exención no lo ` +
+        'cubre: reclamá tarea.',
+    );
+  } else if (ctx.exemption.foreign && !ctx.exemption.expired) {
+    lines.push(
+      `Hay una exención vigente, pero la usó OTRA sesión: "${ctx.exemption.reason}". No se ` +
+        `hereda. Si tu trabajo es ESO mismo, re-declarala con \`${ctx.cli} exempt --reason ` +
+        '"<motivo actual>"`; si es otra cosa, reclamá tarea.',
+    );
   } else {
     lines.push(
       'Ninguna tarea reclamada. Antes de implementar, arreglar o refactorizar algo, corré ' +
@@ -381,7 +452,7 @@ async function cmdGuard() {
   const { config, ok } = loadConfig();
   if (!ok) return 0; // unreadable config → never block
 
-  const ctx = buildContext(config, cwd);
+  const ctx = buildContext(config, cwd, sessionIdFrom(payload));
 
   // El usuario ya dijo que no, por escrito. No se re-litiga.
   if (ctx.excluded) return 0;
@@ -405,19 +476,22 @@ async function cmdGuard() {
   // "el tablero quedó mintiendo sobre trabajo que ya se hizo", y eso no se arregla solo.
   // Un `sync_failed` heredado de cuando el mecanismo de evidencia no funcionaba no puede trabar
   // el proyecto: se limpia solo y se sigue. La deuda solo es real si el registro es confiable.
-  if (ctx.syncFailed && !ctx.evidence.everSeen) {
+  if (ctx.syncFailed.length && !ctx.evidence.everSeen) {
     clearSyncFailed(ctx.matchedKey || ctx.cwd);
     return 0;
   }
 
-  if (ctx.syncFailed) {
+  if (ctx.syncFailed.length) {
     err(
       [
         'BLOQUEADO: hay trabajo SIN SINCRONIZAR con ClickUp en este proyecto.',
         '',
-        `Tarea: ${ctx.syncFailed.task_id ?? '(sin id registrado)'}`,
-        `Desde: ${ctx.syncFailed.at}`,
-        `Motivo: ${ctx.syncFailed.reason}`,
+        ...ctx.syncFailed.map(
+          (d) =>
+            `Tarea: ${d.task_id ?? '(sin id registrado)'}\n` +
+            `Desde: ${d.at}\n` +
+            `Motivo: ${d.reason}`,
+        ),
         '',
         'Un turno anterior terminó con una tarea reclamada de la que el harness NUNCA vio una',
         'mutación en ClickUp. O sea: el tablero no refleja lo que se hizo acá, y seguir',
@@ -437,8 +511,26 @@ async function cmdGuard() {
   }
 
   if (!ctx.defaults.block_writes_without_task) return 0; // lock switched off at install
-  if (ctx.claim) return 0; // a task is claimed
-  if (ctx.exemption.active) return 0; // a live, written-down exemption
+
+  // CUALQUIER tarea reclamada abre el candado, sin mirar de qué sesión es.
+  //
+  // Es a propósito, y es lo contrario de lo que pide la intuición. La alternativa —exigir que
+  // ESTA sesión tenga su propio claim— suena más correcta y es peor: el CLI graba la sesión
+  // leyendo `CLAUDE_CODE_SESSION_ID` y el guard la lee del stdin del hook, y no hay nada que
+  // garantice que las dos vías coincidan en toda instalación. Si difirieran, una sesión que
+  // reclamó su tarea quedaría bloqueada sin entender por qué, a mitad del trabajo.
+  //
+  // El candado existe para que nadie escriba sin que haya UNA tarea abierta que registre el
+  // trabajo, no para auditar quién la abrió. Esa auditoría vive donde el peor caso es barato:
+  // en el hook `Stop`, que exige solo lo propio y como mucho avisa de más.
+  if (ctx.claims.length) return 0;
+  if (ctx.exemption.active) {
+    // Atar la exención a ESTA sesión, la primera vez que se la honra. El guard es quien ata
+    // porque el guard es quien compara: así el id que se escribe y el id contra el que después
+    // se mide salen del mismo lugar, y no hay forma de que discrepen. Ver `bindExemption`.
+    bindExemption(ctx.matchedKey || ctx.cwd, sessionIdFrom(payload));
+    return 0;
+  }
 
   // ---- fail closed ----
   if (ctx.exemption.expired) {
@@ -452,6 +544,31 @@ async function cmdGuard() {
         'Volvé a decidir: si este trabajo amerita tarea, reclamala; si no, volvé a declarar la ' +
         'exención con el motivo ACTUAL:\n\n' +
         '    clickup-flow exempt --reason "<motivo concreto>"',
+    );
+    return 2;
+  }
+
+  if (ctx.exemption.foreign) {
+    err(
+      [
+        'BLOQUEADO: hay una exención vigente, pero es de OTRA SESIÓN.',
+        '',
+        'Dice esto:',
+        '',
+        `    ${ctx.exemption.reason}`,
+        '',
+        `Le quedan ${restante(ctx.exemption)}, pero se emitió para ese trabajo y para esa sesión.`,
+        'Un permiso dado para una cosa no lo hereda la siguiente: así es como un cambio grande se',
+        'cuela sin tarea, amparado por una exención que hablaba de otra cosa.',
+        '',
+        'Dos salidas:',
+        '',
+        'A) Lo tuyo ES eso mismo → re-declarala con el motivo ACTUAL y seguí:',
+        '',
+        `        ${ctx.cli} exempt --reason "<motivo concreto>"`,
+        '',
+        'B) Lo tuyo es otra cosa → reclamá la tarea que le corresponde.',
+      ].join('\n'),
     );
     return 2;
   }
@@ -674,9 +791,99 @@ function extractTaskIds(payload) {
     visitar(obj, null);
   };
 
+  // Regla 0: `entity_id`, pero SOLO cuando la entidad es una tarea.
+  //
+  // `clickup_create_comment` —la herramienta vigente— nombra su objetivo `entity_id`, no
+  // `task_id`; ese nombre lo usa solo la deprecada `clickup_create_task_comment`. Sin esto,
+  // NINGÚN comentario dejaba evidencia, y comentar es la mitad del protocolo.
+  //
+  // No alcanza con meter `entity_id` en CLAVES_TAREA: la misma clave apunta a listas y vistas
+  // según `entity_type`, y aceptarla a ciegas marcaría como verificado un claim con el id de una
+  // lista. Se acepta cuando el tipo es `task`, o cuando no viene —el default del conector.
+  const entrada = payload?.tool_input;
+  if (entrada && typeof entrada === 'object' && entrada.entity_id !== undefined) {
+    const tipo = String(entrada.entity_type ?? 'task').trim().toLowerCase();
+    if (tipo === 'task') agregar(entrada.entity_id);
+  }
+
   visitar(payload?.tool_input, null);
   raiz(payload?.tool_response);
+  // Y `visitar` TAMBIÉN sobre la respuesta, que es el arreglo que hacía falta.
+  //
+  // `raiz()` abre con `if (typeof obj !== 'object') return`, así que un `tool_response` que llega
+  // como STRING con JSON adentro se descartaba entero — y `visitar()`, que sí sabe parsearlo,
+  // nunca lo veía. Consecuencia medida contra el tablero real: `clickup_create_task` no dejaba
+  // evidencia NUNCA, porque su id existe solo en la respuesta (cuando se llamó, la tarea todavía
+  // no existía y el `tool_input` no puede nombrarla).
+  //
+  // Para un `tool_response` que ya era objeto esto no cambia nada: `raiz()` termina llamando a
+  // `visitar()` igual, y `out` es un Set. Lo único que se agrega es el camino del string.
+  visitar(payload?.tool_response, null);
   return [...out];
+}
+
+/** `tool_response` llega como objeto o como el JSON adentro de un string, según el conector. */
+function objetoDe(valor) {
+  if (valor && typeof valor === 'object' && !Array.isArray(valor)) return valor;
+  if (typeof valor === 'string') {
+    try {
+      const p = JSON.parse(valor);
+      return p && typeof p === 'object' && !Array.isArray(p) ? p : null;
+    } catch {
+      return null;
+    }
+  }
+  return null;
+}
+
+/**
+ * El nombre CANÓNICO que esta llamada le dejó a la tarea, si le dejó alguno.
+ *
+ * DE DÓNDE SALE, Y POR QUÉ NO DE DONDE PARECERÍA. Lo intuitivo sería leerlo del `tool_response`,
+ * igual que el id. **No está ahí**: `clickup_create_task` y `clickup_update_task` devuelven
+ * `{success, task_id, custom_id, task_url}` y nada más. El único que devuelve `name` es
+ * `clickup_get_task`, y ese NO está en `MCP_WRITE_TOOLS` — no por olvido, sino porque una lectura
+ * no es prueba de que el trabajo se registró, y meterla en ese matcher rompería la verificación
+ * entera.
+ *
+ * Donde sí está es en el `tool_input`: es el nombre que la llamada le PUSO a la tarea. Sigue
+ * siendo evidencia del harness y no un dato que el modelo nos cuenta aparte.
+ *
+ * HUECO CONOCIDO: una tarea preexistente que se reclama sin crearla ni renombrarla no pasa su
+ * nombre por ningún matcher, así que se queda sin `clickup_name`. Cubrirlo exigiría un matcher de
+ * solo lectura para `clickup_get_task` —un hook más en el settings.json de cada instalación— y
+ * eso es una decisión del usuario, no una que se toma de contrabando acá.
+ *
+ * Devuelve `{ taskId, name }` o `null`.
+ */
+function extractCanonicalName(payload, ids = []) {
+  const tool = String(payload?.tool_name ?? '');
+  const crea = /clickup_create_task$/.test(tool);
+  const actualiza = /clickup_update_task$/.test(tool);
+  if (!crea && !actualiza) return null;
+
+  const nombre = payload?.tool_input?.name;
+  if (typeof nombre !== 'string' || !nombre.trim()) return null;
+
+  // El id vive en lugares distintos según la herramienta, y no es un detalle: al CREAR la tarea
+  // todavía no existía, así que el id solo puede venir de la respuesta; al ACTUALIZAR, la llamada
+  // lo nombra en la entrada. Sacarlo de `extractTaskIds` sería más corto y estaría mal: esa
+  // función devuelve TODOS los ids que encontró, y con más de uno el nombre se pegaría al que no.
+  //
+  // Al crear, la fuente preferida es lo que YA resolvió `extractTaskIds`, que sabe leer las
+  // cuatro formas en que llega una respuesta (objeto, string con JSON, envoltorio MCP
+  // `{content:[{text}]}`). Leer `resp.task_id` a mano parecía suficiente y no lo era: con el
+  // envoltorio MCP el id está adentro del texto y esa lectura devolvía `undefined`.
+  //
+  // Se exige que haya EXACTAMENTE uno. Con varios no hay forma de saber a cuál pertenece el
+  // nombre, y pegárselo al que no sería peor que no guardarlo.
+  const resp = objetoDe(payload?.tool_response);
+  const bruto = crea
+    ? (ids.length === 1 ? ids[0] : (resp?.task_id ?? resp?.data?.task_id ?? resp?.task?.id))
+    : payload?.tool_input?.task_id;
+  const taskId = bruto === undefined || bruto === null ? '' : String(bruto).trim();
+  if (!taskId) return null;
+  return { taskId, name: nombre.trim() };
 }
 
 /**
@@ -697,13 +904,21 @@ async function cmdSyncHook() {
   const { config, ok } = loadConfig();
   if (!ok) return 0;
 
-  const ctx = buildContext(config, cwd);
+  const ctx = buildContext(config, cwd, sessionIdFrom(payload));
   if (!ctx.registered) return 0;
 
   const ids = extractTaskIds(payload);
+  const clave = ctx.matchedKey || ctx.cwd;
+
+  // El nombre va por su propio carril, y NUNCA como evidencia. Ver `recordTaskName` en state.mjs:
+  // si esto contara, renombrar una tarea abriría el candado sin haber registrado ningún trabajo.
+  // Va ANTES del corte por `ids` vacío: un renombre nombra su tarea en el `tool_input`, así que
+  // sigue siendo resoluble aunque la respuesta no aporte nada.
+  const canonico = extractCanonicalName(payload, ids);
+  if (canonico) recordTaskName(clave, canonico);
+
   if (!ids.length) return 0;
 
-  const clave = ctx.matchedKey || ctx.cwd;
   for (const id of ids) {
     recordMcpWrite(clave, { tool: payload?.tool_name ?? null, taskId: id });
   }
@@ -852,7 +1067,7 @@ async function cmdTimerHook() {
   const { config, ok } = loadConfig();
   if (!ok) return 0;
 
-  const ctx = buildContext(config, cwd);
+  const ctx = buildContext(config, cwd, sessionIdFrom(payload));
   if (!ctx.registered) return 0;
 
   const tool = String(payload?.tool_name ?? '');
@@ -903,13 +1118,23 @@ async function cmdStopHook() {
   const { config, ok } = loadConfig();
   if (!ok) return 0;
 
-  const ctx = buildContext(config, cwd);
+  const ctx = buildContext(config, cwd, sessionIdFrom(payload));
   if (!ctx.registered) return 0;
 
   const clave = ctx.matchedKey || ctx.cwd;
 
-  // Sin tarea reclamada no hay nada que exigir; con una verificada, el trabajo está reflejado.
-  if (!ctx.claim || ctx.claimVerified) {
+  // ACÁ SE ELIMINA EL BLOQUEO CRUZADO, y es una sola palabra: `unverifiedMine`, no `claims`.
+  //
+  // Antes esto exigía sobre EL claim del proyecto, en singular y sin dueño. Con dos sesiones
+  // trabajando tareas distintas en el mismo repo, la sesión A no podía cerrar su turno hasta
+  // que la tarea de B estuviera verificada — y B, simétricamente, tampoco. Dos sesiones que no
+  // compartían nada quedaban trabadas una por la otra, y la única salida visible era pausar una
+  // tarea en `on hold` para poder trabajar la otra.
+  //
+  // Ahora cada sesión rinde cuentas SOLO de lo suyo. Un claim sin sesión registrada (estado
+  // migrado del formato viejo) sigue siendo de todos: ver `claimIsMine`.
+  const pendientes = ctx.unverifiedMine;
+  if (!pendientes.length) {
     resetStopBlocks(clave);
     return 0;
   }
@@ -927,7 +1152,8 @@ async function cmdStopHook() {
   if (!ctx.evidence.everSeen) {
     resetStopBlocks(clave);
     err(
-      `[clickup-flow] ${ctx.claim.task_id} figura reclamada y sin cerrar, pero NO se exige nada: ` +
+      `[clickup-flow] ${pendientes.map((c) => c.task_id).join(', ')} ` +
+        'figura(n) reclamada(s) y sin cerrar, pero NO se exige nada: ' +
         'el hook `PostToolUse` que registra las mutaciones de ClickUp nunca corrió en esta ' +
         'instalación, así que no hay forma de saber si el trabajo se registró o no. ' +
         'Probablemente el matcher no coincide con el nombre de las herramientas del conector — ' +
@@ -939,41 +1165,58 @@ async function cmdStopHook() {
   const bloqueos = bumpStopBlocks(clave, payload?.session_id ?? null);
 
   if (bloqueos > MAX_BLOQUEOS_STOP) {
-    setSyncFailed(clave, {
-      taskId: ctx.claim.task_id,
-      reason: `el turno se cerró tras ${MAX_BLOQUEOS_STOP} avisos sin ninguna mutación MCP sobre ${ctx.claim.task_id}`,
-    });
+    // UNA deuda POR TAREA. Anotar solo la última perdería en silencio la evidencia de que la
+    // otra también quedó sin reflejar, que es justo lo que este registro existe para no perder.
+    for (const c of pendientes) {
+      setSyncFailed(clave, {
+        taskId: c.task_id,
+        reason: `el turno se cerró tras ${MAX_BLOQUEOS_STOP} avisos sin ninguna mutación MCP sobre ${c.task_id}`,
+      });
+    }
     resetStopBlocks(clave);
     err(
-      `[clickup-flow] Se cierra el turno con ${ctx.claim.task_id} SIN sincronizar. Queda ` +
-        'registrado: el candado de escritura de este proyecto no se vuelve a abrir hasta que ' +
-        'haya una mutación real en ClickUp sobre esa tarea.',
+      `[clickup-flow] Se cierra el turno con ${pendientes.map((c) => c.task_id).join(', ')} ` +
+        'SIN sincronizar. Queda registrado: el candado de escritura de este proyecto no se ' +
+        'vuelve a abrir hasta que haya una mutación real en ClickUp sobre esa(s) tarea(s).',
     );
     return 0;
   }
 
+  const varias = pendientes.length > 1;
   err(
     [
-      `No termines todavía: la tarea ${ctx.claim.task_id} está reclamada y NO hay ninguna`,
-      'mutación de ClickUp registrada para ella en este proyecto.',
+      varias
+        ? `No termines todavía: ${pendientes.length} tareas tuyas están reclamadas y NO hay`
+        : `No termines todavía: la tarea ${pendientes[0].task_id} está reclamada y NO hay ninguna`,
+      varias
+        ? 'ninguna mutación de ClickUp registrada para ellas en este proyecto.'
+        : 'mutación de ClickUp registrada para ella en este proyecto.',
       '',
-      `Tarea: ${ctx.claim.title ?? 's/título'}`,
-      `Reclamada: ${ctx.claim.claimed_at}`,
+      ...pendientes.map(
+        (c) => `  · ${c.task_id} — ${c.title ?? 's/título'} (reclamada ${c.claimed_at})`,
+      ),
       '',
       'Esto no lo dice el modelo: lo dice el harness. El hook `PostToolUse` registra cada',
-      'llamada de escritura al MCP de ClickUp, y para esta tarea no vio ninguna.',
+      'llamada de escritura al MCP de ClickUp, y para estas tareas no vio ninguna.',
       '',
-      'Antes de cerrar, hacé lo que corresponda por MCP:',
+      'Antes de cerrar, hacé lo que corresponda por MCP, TAREA POR TAREA:',
       '',
-      `  · Si la tarea existe y el trabajo avanzó → comentario de avance en ${ctx.claim.task_id}.`,
+      '  · Si la tarea existe y el trabajo avanzó → comentario de avance en ESA tarea.',
       '  · Si el trabajo terminó → estado final + comentario de cierre, y después',
-      `    \`${ctx.cli} release\`.`,
-      `  · Si te retirás a mitad → \`on hold\` con el motivo, y \`${ctx.cli} release\`.`,
-      `  · Si el claim fue un error → \`${ctx.cli} release --force\`.`,
+      `    \`${ctx.cli} release --task-id <id>\`.`,
+      `  · Si te retirás a mitad → \`on hold\` con el motivo, y \`${ctx.cli} release --task-id <id>\`.`,
+      `  · Si el claim fue un error → \`${ctx.cli} release --task-id <id> --force\`.`,
       '',
+      // `null`, no `''`: la lista tiene líneas en blanco a propósito y filtrarlas por vacío
+      // pegotearía todos los párrafos.
+      varias
+        ? 'El id no es opcional: son varias y ninguna es "la actual". Resolver una no cierra la otra.'
+        : null,
       `(Este aviso aparece ${MAX_BLOQUEOS_STOP} veces como máximo. Después el turno cierra igual,`,
       'pero el proyecto queda bloqueado para escribir hasta reconciliar.)',
-    ].join('\n'),
+    ]
+      .filter((l) => l !== null)
+      .join('\n'),
   );
   return 2;
 }
@@ -990,7 +1233,7 @@ function cmdContext(args) {
     say('\nCorré `clickup-flow doctor`, o reinstalá la herramienta.');
     return 1;
   }
-  const ctx = buildContext(config, cwd);
+  const ctx = buildContext(config, cwd, sessionIdFrom());
   say(renderContext(ctx));
   return 0;
 }
@@ -1002,7 +1245,7 @@ function cmdStatus(args) {
     err(`config ilegible: ${error}`);
     return 1;
   }
-  const ctx = buildContext(config, cwd);
+  const ctx = buildContext(config, cwd, sessionIdFrom());
   const lines = [];
   lines.push(`config          ${configPath()}${existed ? '' : ' (no existe todavía)'}`);
   lines.push(`proyecto        ${ctx.cwd}`);
@@ -1060,17 +1303,38 @@ function cmdStatus(args) {
     );
   }
   lines.push(`candado         ${ctx.defaults.block_writes_without_task ? 'activo' : 'desactivado'}`);
-  lines.push(
-    `claim           ${
-      ctx.claim ? `${ctx.claim.task_id} — ${ctx.claim.title ?? ''}` : 'ninguno'
-    }`,
-  );
+  if (!ctx.claims.length) {
+    lines.push('claims          ninguno');
+  } else {
+    lines.push(`claims          ${ctx.claims.length} activa(s)`);
+    for (const c of ctx.claims) {
+      lines.push(
+        `                ${c.task_id} — ${c.title ?? ''}` +
+          `${c.verified_at ? '' : '  (sin evidencia MCP)'}`,
+      );
+      // El nombre real solo se imprime cuando DIFIERE. Repetirlo cuando coincide convertiría el
+      // aviso en ruido, y un aviso que aparece siempre se deja de leer.
+      if (claimNameMismatch(c)) {
+        lines.push(`                  en ClickUp se llama: ${c.clickup_name}`);
+      }
+    }
+    if (ctx.claims.length > 1) {
+      lines.push('                al cerrar, el id es obligatorio: release --task-id <id>');
+    }
+  }
+  // Acá también el motivo va primero: un `status` que abre con "vigente" invita a leer el estado
+  // y saltear el alcance, que es justo el error que la exención tiene que hacer difícil.
   if (ctx.exemption.active) {
+    lines.push(`exención        "${ctx.exemption.reason}"`);
     lines.push(
-      `exención        vigente (${ctx.exemption.ageHours.toFixed(1)}/${ctx.exemption.limitHours}h): ${ctx.exemption.reason}`,
+      `                cubre ESE trabajo y nada más — le quedan ${restante(ctx.exemption)} de ` +
+        `${duracionHoras(ctx.exemption.limitHours)}`,
     );
   } else if (ctx.exemption.expired) {
-    lines.push('exención        VENCIDA');
+    lines.push(`exención        VENCIDA — decía: "${ctx.exemption.reason}"`);
+  } else if (ctx.exemption.foreign) {
+    lines.push(`exención        "${ctx.exemption.reason}"`);
+    lines.push('                DE OTRA SESIÓN — re-declarala con el motivo actual, o reclamá tarea');
   }
   if (ctx.defaults.track_time) {
     lines.push(
@@ -1123,43 +1387,28 @@ function cmdClaim(args) {
     return 1;
   }
 
-  // Un claim distinto ya vigente en este proyecto se rechaza, no se sobrescribe.
+  // ACÁ ESTABA EL RECHAZO, y su eliminación es el cambio que este rediseño vino a hacer.
   //
-  // Verificado: dos sesiones de Claude Code abiertas en el MISMO repo (el caso normal de tener
-  // una en la terminal y otra en el IDE) se pisaban el claim en silencio. Cada una creía tener
-  // su tarea, y cuando la primera cerraba con `release`, la segunda quedaba bloqueada a mitad
-  // del trabajo sin haber cerrado nada. Fallar acá con un mensaje es mucho mejor que descubrirlo
-  // así.
-  const previous = readState(cwd).claim;
-  if (previous && previous.task_id && previous.task_id !== String(taskId) && !args.force) {
-    err(
-      `Ya hay una tarea reclamada en este proyecto: ${previous.task_id}` +
-        `${previous.title ? ` — ${previous.title}` : ''}` +
-        `${previous.claimed_at ? ` (desde ${previous.claimed_at})` : ''}.\n\n` +
-        'El protocolo lleva UNA tarea por proyecto a la vez. Dos causas posibles:\n\n' +
-        `  1. Esa tarea sigue abierta y hay que cerrarla primero: /tarea fin ${previous.task_id}\n` +
-        '     (o pausarla en `on hold` si queda a medias).\n' +
-        '  2. Hay OTRA sesión de Claude trabajando en este mismo repo. Si es así, no le pises el\n' +
-        '     claim: coordinalo con el usuario antes de seguir.\n\n' +
-        'Si de verdad querés reemplazarlo, `--force` — pero entonces la tarea anterior queda\n' +
-        `abierta en ClickUp y sin nadie encima.`,
-    );
-    return 1;
-  }
+  // Antes, una segunda tarea en el mismo proyecto fallaba pidiendo cerrar la anterior o pausarla
+  // en `on hold`. El motivo original era real —dos sesiones se pisaban el ÚNICO claim que cabía
+  // en el estado— pero la solución trataba un límite del formato como si fuera una regla del
+  // trabajo. Y desequilibraba el tablero: una tarea perfectamente activa terminaba en `on hold`
+  // sin estar detenida por nada, solo para que otra pudiera empezar.
+  //
+  // Ahora caben N. Reclamar dos veces la MISMA tarea no duplica: actualiza la entrada.
+  const yaEstaban = activeClaims(readState(cwd));
+  const otras = yaEstaban.filter((c) => c.task_id !== String(taskId));
 
   const email = args.email || gitEmail(cwd);
-  const file = setClaim(cwd, {
+  const file = addClaim(cwd, {
     taskId: String(taskId),
     title: args.title ? String(args.title) : null,
     url: args.url ? String(args.url) : null,
     role: args.role ? String(args.role) : null,
     gitEmail: email,
+    // De quién es esta tarea. El hook `Stop` lo usa para no exigirle a una sesión lo de otra.
+    session: sessionIdFrom(),
   });
-
-  if (previous && previous.task_id && previous.task_id !== String(taskId)) {
-    say(`⚠ Reemplazado por --force el claim anterior: ${previous.task_id}`);
-    say('  Esa tarea quedó abierta en ClickUp y sin nadie encima. Cerrala o pausala.');
-  }
 
   // Learning the git email here is how a second machine's alias stops looking like a colleague.
   if (email && rememberGitEmail(config, email)) saveConfig(config);
@@ -1167,10 +1416,22 @@ function cmdClaim(args) {
   say(`Tarea ${taskId} reclamada. Escritura desbloqueada.`);
   say(`  claim: ${file}`);
 
+  // Decir qué MÁS hay activo, y decirlo acá, es lo que evita el error que sigue a este comando:
+  // trabajar sobre dos y cerrar la que uno recuerde. No es una advertencia, es el inventario.
+  if (otras.length) {
+    say('');
+    say(`Este proyecto ahora lleva ${otras.length + 1} tareas activas a la vez:`);
+    for (const o of otras) say(`  · ${o.task_id} — ${o.title ?? 's/título'} (desde ${o.claimed_at})`);
+    say(`  · ${taskId} — ${args.title ? String(args.title) : 's/título'} (recién)`);
+    say('');
+    say('Ninguna bloquea a la otra y ninguna hay que pausar. Pero al cerrar, el id es');
+    say(`OBLIGATORIO:  ${cliInvocation(config)} release --task-id <id>`);
+  }
+
   // El claim se verifica con la evidencia que dejó `PostToolUse`, no con lo que diga el llamador.
   // Si el orden fue el natural —crear la tarea por MCP y después registrarla— la evidencia ya
   // está y esto no aparece. Si aparece, es porque se reclamó un id que el harness nunca vio.
-  if (!readState(cwd).claim?.verified_at) {
+  if (!findClaim(readState(cwd), String(taskId))?.verified_at) {
     say('');
     say(`⚠ Sin evidencia todavía: el harness no registró ninguna llamada MCP sobre ${taskId}.`);
     say('  Si la tarea ya existe, la próxima mutación (comentario o cambio de estado) la verifica.');
@@ -1182,13 +1443,27 @@ function cmdClaim(args) {
 function cmdRelease(args) {
   const cwd = canonicalProjectKey(args.cwd || process.cwd());
   const state = readState(cwd);
-  const current = state.claim;
+  const claims = activeClaims(state);
+  const pedido = args['task-id'] || args.task || args._[0];
 
-  if (!current) {
+  const inventario = () =>
+    claims.map((c) => `  · ${c.task_id} — ${c.title ?? 's/título'} (desde ${c.claimed_at})`);
+  // `release` no construye contexto (tiene que funcionar con el config roto), así que la
+  // invocación se resuelve acá. `loadConfig` degrada a `{}` y `cliInvocation` a su default.
+  const cli = cliInvocation(loadConfig().config);
+
+  if (args.all) {
+    const n = clearAllClaims(cwd);
+    clearSyncFailed(cwd);
+    say(n ? `${n} claim(s) liberado(s).` : 'No había ningún claim.');
+    return 0;
+  }
+
+  if (!claims.length) {
     // `release --force` sin claim sigue sirviendo para una cosa: saldar una sincronización que
     // quedó fallida. Es la salida "el registro estaba equivocado, no hay nada que sincronizar"
     // que el guard le ofrece al usuario, y sin esto no habría forma de destrabarse.
-    if (args.force && state.sync_failed) {
+    if (args.force && state.sync_failed.length) {
       clearSyncFailed(cwd);
       say('Sincronización pendiente descartada por --force. El candado vuelve a la normalidad.');
       return 0;
@@ -1197,20 +1472,45 @@ function cmdRelease(args) {
     return 0;
   }
 
-  // Si se dice QUÉ tarea se está soltando, se verifica que sea esa.
+  // ESTA ES LA REGLA QUE EVITA CERRAR LA TAREA EQUIVOCADA, y es la razón de todo el rediseño.
   //
-  // Sin esto, dos sesiones en el mismo repo se sabotean: la sesión A termina su tarea, corre
-  // `release`, y borra el claim de la sesión B — que queda bloqueada a mitad del trabajo sin
-  // entender por qué. El id es opcional para no romper el uso simple, pero cuando se pasa, manda.
-  const expected = args['task-id'] || args.task || args._[0];
-  if (expected && current.task_id && String(expected) !== current.task_id && !args.force) {
+  // Con dos o más tareas activas, `release` sin id NO elige ninguna. No la más reciente, no la
+  // primera, no "la actual". El pedido fue explícito: que terminar la tarea A nunca toque la B
+  // por haber sido la última. Cualquier default acá produce exactamente ese error, y lo produce
+  // en silencio — el comando reportaría éxito habiendo cerrado la que no era.
+  //
+  // Con UNA sola activa no hay ambigüedad posible, así que ahí el id sigue siendo opcional.
+  if (!pedido && claims.length > 1) {
     err(
-      `El claim vigente NO es la tarea que estás soltando.\n\n` +
-        `  querés soltar:  ${expected}\n` +
-        `  claim vigente:  ${current.task_id}${current.title ? ` — ${current.title}` : ''}\n\n` +
-        'Lo más probable es que otra sesión de Claude reclamó algo en este mismo repo. Soltarlo\n' +
-        'la dejaría bloqueada a mitad del trabajo, así que no se toca.\n\n' +
-        'Verificá el estado de tu tarea en ClickUp, y si igual querés limpiar el claim: --force.',
+      [
+        `Hay ${claims.length} tareas reclamadas en este proyecto y no dijiste cuál soltar.`,
+        '',
+        ...inventario(),
+        '',
+        'No elijo por vos: no existe "la última" ni "la actual". Soltar la equivocada dejaría',
+        'una tarea abierta en ClickUp sin nadie encima y cerraría una que seguía en curso, y el',
+        'comando te diría que salió bien.',
+        '',
+        `    ${cli} release --task-id <id>`,
+        '',
+        `Para soltarlas todas de una:  ${cli} release --all`,
+      ].join('\n'),
+    );
+    return 1;
+  }
+
+  const current = pedido ? findClaim(state, pedido) : claims[0];
+
+  if (!current) {
+    err(
+      [
+        `No hay ningún claim para ${pedido} en este proyecto.`,
+        '',
+        'Lo que SÍ está reclamado acá:',
+        ...inventario(),
+        '',
+        'Si esa tarea es de otro proyecto, corré el release desde su carpeta.',
+      ].join('\n'),
     );
     return 1;
   }
@@ -1224,7 +1524,18 @@ function cmdRelease(args) {
   // Solo mira los relojes que ESTA herramienta vio arrancar (ver `timerStatus`): si el hook nunca
   // corrió no hay nada anotado y esto no se dispara nunca, que es el fallo abierto correcto.
   const reloj = timerStatus(state);
-  if (reloj.running && !args.force) {
+  // Solo traba el reloj DE ESTA TAREA.
+  //
+  // ClickUp lleva un único cronómetro por persona, así que con dos tareas activas el reloj puede
+  // ser de la otra. Antes esto miraba `reloj.running` a secas y el resultado era el bloqueo
+  // cruzado en su forma más confusa: cerrar la tarea A fallaba pidiendo parar un reloj que
+  // pertenecía a la B, o sea pedía interrumpir trabajo en curso para poder cerrar otra cosa.
+  //
+  // Un reloj sin `task_id` (arrancado fuera de Claude Code y reconciliado acá) se trata como
+  // propio: no se puede demostrar que sea ajeno, y el olvido es el fallo caro.
+  const relojDeEstaTarea = !reloj.taskId || reloj.taskId === current.task_id;
+  const relojMio = reloj.running && relojDeEstaTarea;
+  if (relojMio && !args.force) {
     err(
       [
         `No se puede soltar ${current.task_id}: el cronómetro de ClickUp sigue CORRIENDO.`,
@@ -1240,7 +1551,7 @@ function cmdRelease(args) {
         'Si el reloj ya lo paraste por fuera de Claude Code (la app, el móvil), reconciliá el',
         'registro local y volvé a soltar:  clickup-flow timer clear',
         '',
-        'Si preferís soltar igual y dejarlo corriendo a propósito:  release --force',
+        `Si preferís soltar igual y dejarlo corriendo a propósito:  release --task-id ${current.task_id} --force`,
       ].join('\n'),
     );
     return 1;
@@ -1260,14 +1571,19 @@ function cmdRelease(args) {
   // soltar solo trabaría el proyecto sin motivo. Se suelta, avisando fuerte.
   const salud = evidenceHealth();
   if (!hasMcpEvidence(state, current.task_id, current.claimed_at) && !salud.everSeen) {
-    clearClaim(cwd);
-    if (state.sync_failed) clearSyncFailed(cwd);
+    removeClaim(cwd, current.task_id);
+    clearSyncFailed(cwd, current.task_id);
     say(`Claim liberado (${current.task_id ?? 's/id'}).`);
     say('');
     say('⚠ Se soltó SIN verificar, y no por culpa tuya: el hook `PostToolUse` que registra las');
     say('  mutaciones de ClickUp nunca corrió en esta instalación, así que no hay con qué');
     say('  verificar. Revisá `clickup-flow doctor` — el matcher probablemente no coincide con el');
     say('  nombre de las herramientas de tu conector.');
+    // Qué sigue abierto se dice en TODAS las salidas de `release`, no solo en la normal. Soltar
+    // una de dos y no enterarse de que la otra sigue viva es justo el descuido a evitar.
+    for (const c of activeClaims(readState(cwd))) {
+      say(`  · sigue activa: ${c.task_id} — ${c.title ?? 's/título'}`);
+    }
     return 0;
   }
 
@@ -1287,21 +1603,33 @@ function cmdRelease(args) {
         'Cerrala de verdad primero — estado final y comentario de cierre por MCP — y volvé a',
         'correr `release`. El registro se actualiza solo.',
         '',
-        'Si el claim fue un error y no hay nada que cerrar en ClickUp:  release --force',
+        `Si el claim fue un error y no hay nada que cerrar en ClickUp:  release --task-id ${current.task_id} --force`,
       ].join('\n'),
     );
     return 1;
   }
 
   const sinEvidencia = !hasMcpEvidence(state, current.task_id, current.claimed_at);
-  clearClaim(cwd);
-  if (state.sync_failed) clearSyncFailed(cwd);
+  removeClaim(cwd, current.task_id);
+  // Se salda SOLO la deuda de esta tarea. Las otras siguen bloqueando, que es lo correcto.
+  clearSyncFailed(cwd, current.task_id);
   // El cronómetro ya parado no le sirve a nadie: se limpia con el claim. Si sigue corriendo
   // (solo posible con --force) se DEJA anotado, para que el próximo `timer status` lo diga.
-  if (!reloj.running) clearTimer(cwd);
-  say(`Claim liberado (${current.task_id ?? 's/id'}). El candado vuelve a pedir tarea.`);
-  if (reloj.running) {
+  // Y si el reloj es de OTRA tarea, no se toca: sigue siendo trabajo en curso de alguien.
+  if (!reloj.running && relojDeEstaTarea) clearTimer(cwd);
+
+  const quedan = activeClaims(readState(cwd));
+  say(
+    quedan.length
+      ? `Claim liberado (${current.task_id ?? 's/id'}). Quedan ${quedan.length} tarea(s) activa(s), ` +
+          'así que el candado sigue abierto.'
+      : `Claim liberado (${current.task_id ?? 's/id'}). El candado vuelve a pedir tarea.`,
+  );
+  for (const c of quedan) say(`  · sigue activa: ${c.task_id} — ${c.title ?? 's/título'}`);
+  if (relojMio) {
     say(`⚠ El cronómetro quedó corriendo sobre ${reloj.taskId ?? current.task_id}. Paralo vos.`);
+  } else if (reloj.running) {
+    say(`⏱ Sigue corriendo el cronómetro de ${reloj.taskId}, que es otra tarea. No lo toqué.`);
   }
   if (sinEvidencia) {
     say('⚠ Se soltó con --force SIN evidencia de ninguna mutación en ClickUp.');
@@ -1408,7 +1736,7 @@ function cmdTimer(args) {
     return 1;
   }
 
-  const ctx = buildContext(config, cwd);
+  const ctx = buildContext(config, cwd, sessionIdFrom());
   const verdict = timeTrackingReady(config);
   const salud = timerHealth();
   const reloj = timerStatus(readState(ctx.matchedKey || ctx.cwd));
@@ -1454,9 +1782,21 @@ function cmdExempt(args) {
     );
     return 1;
   }
-  const hours = Number.parseFloat(args.hours ?? config.defaults.exemption_hours ?? 8);
+  const porDefecto = config.defaults.exemption_hours ?? DEFAULT_EXEMPTION_HOURS;
+  const pedidas = Number.parseFloat(args.hours ?? porDefecto);
+  const { hours, clamped } = clampExemptionHours(pedidas, porDefecto);
   setExemption(cwd, reason, hours);
-  say(`Exención declarada por ${hours}h: ${String(reason).trim()}`);
+  if (clamped) {
+    say(
+      `Pediste ${pedidas}h y quedó acotada a ${MAX_EXEMPTION_HOURS}h, que es el techo. Por encima ` +
+        'de eso la respuesta correcta no es una exención más larga: es una tarea.',
+    );
+  }
+  say(`Exención declarada por ${duracionHoras(hours)}: ${String(reason).trim()}`);
+  // Decirlo AL DECLARAR, y no sólo cuando bloquea. Quien declara una exención está eligiendo un
+  // alcance, y el alcance incluye "hasta que termine esta sesión" — enterarse de eso recién
+  // cuando el candado te frena es enterarse tarde.
+  say('Vale para ESTE trabajo y para ESTA sesión: en otra hay que volver a declararla.');
   say('No la uses para saltear la búsqueda en ClickUp — eso es justo lo que produce duplicados.');
   return 0;
 }
@@ -2178,6 +2518,16 @@ function cmdConfig(args) {
         err('defaults.search_window_days son días enteros (0 = sin límite).');
         return 1;
       }
+      // El techo se valida ACÁ y no sólo al leer. `exemptionStatus` también acota, pero acotar en
+      // silencio dejaría el archivo diciendo 9999 y la herramienta comportándose como 8: dos
+      // fuentes de verdad que no coinciden, que es peor que el valor grande.
+      if (field === 'exemption_hours' && (n <= 0 || n > MAX_EXEMPTION_HOURS)) {
+        err(
+          `defaults.exemption_hours va entre 0 y ${MAX_EXEMPTION_HOURS}h, y llegó ${n}. Por ` +
+            'encima del techo la respuesta correcta no es una ventana más larga: es una tarea.',
+        );
+        return 1;
+      }
       next = n;
     }
     if (field === 'end_date_field' && !['description', 'due_date', 'custom_field'].includes(next)) {
@@ -2218,7 +2568,7 @@ function cmdDoctor(args = { _: [] }) {
     if (!cOk) {
       lines.push('  protocolo     NO se aplica — la configuración global es ilegible (ver abajo)');
     } else {
-      const ctx = buildContext(c, cwd);
+      const ctx = buildContext(c, cwd, sessionIdFrom());
       const comoSeResolvio =
         ctx.matchedBy && ctx.matchedBy !== 'path' ? ` (por ${ctx.matchedBy}: ${ctx.matchedKey})` : '';
       switch (ctx.status) {
@@ -2229,13 +2579,27 @@ function cmdDoctor(args = { _: [] }) {
           lines.push(
             `  candado       ${ctx.defaults.block_writes_without_task ? 'ARMADO' : 'desactivado (defaults.block_writes_without_task=false)'}`,
           );
-          if (ctx.claim) {
-            lines.push(
-              `  tarea         ${ctx.claim.task_id}${ctx.claimVerified ? ' — verificada por el harness' : ' — SIN VERIFICAR (ninguna mutación MCP registrada)'}`,
-            );
-            if (!ctx.claimVerified) problems++;
+          if (ctx.claims.length) {
+            for (const cl of ctx.claims) {
+              lines.push(
+                `  tarea         ${cl.task_id}${claimVerified(cl) ? ' — verificada por el harness' : ' — SIN VERIFICAR (ninguna mutación MCP registrada)'}`,
+              );
+              if (claimNameMismatch(cl)) {
+                lines.push(`                el título guardado dice: "${cl.title}"`);
+                lines.push(`                pero en ClickUp se llama: "${cl.clickup_name}"`);
+                lines.push('                no es un error — pero verificá que sea la tarea que creés');
+              }
+              if (!claimVerified(cl)) problems++;
+            }
+            if (ctx.claims.length > 1) {
+              lines.push(`                ${ctx.claims.length} a la vez — al cerrar, release --task-id <id>`);
+            }
           } else if (ctx.exemption.active) {
-            lines.push(`  tarea         ninguna; exención vigente: ${ctx.exemption.reason}`);
+            lines.push(
+              `  tarea         ninguna; exención de esta sesión (${restante(ctx.exemption)}): ${ctx.exemption.reason}`,
+            );
+          } else if (ctx.exemption.foreign && !ctx.exemption.expired) {
+            lines.push(`  tarea         ninguna; hay exención DE OTRA SESIÓN: ${ctx.exemption.reason}`);
           } else {
             lines.push('  tarea         ninguna reclamada');
           }
@@ -2263,9 +2627,9 @@ function cmdDoctor(args = { _: [] }) {
               );
             }
           }
-          if (ctx.syncFailed) {
-            lines.push(`  ⚠ BLOQUEADO   sincronización pendiente de ${ctx.syncFailed.task_id ?? 's/id'}`);
-            lines.push(`                desde ${ctx.syncFailed.at} — ${ctx.syncFailed.reason}`);
+          for (const d of ctx.syncFailed) {
+            lines.push(`  ⚠ BLOQUEADO   sincronización pendiente de ${d.task_id ?? 's/id'}`);
+            lines.push(`                desde ${d.at} — ${d.reason}`);
             lines.push(`                se destraba cerrando la tarea por MCP, o con \`release --force\``);
             problems++;
           }
@@ -2329,7 +2693,10 @@ function cmdDoctor(args = { _: [] }) {
     // imprimía "identidad ok" igual. `loadConfig` ahora lo corrige al leer y REPORTA lo que
     // corrigió: arreglarlo en silencio lo dejaría invisible, que es la mitad de la queja.
     for (const arreglo of normalised ?? []) {
-      lines.push(`                · contradicción corregida al leer: ${arreglo}`);
+      // "corregido al leer" y no "contradicción": por este mismo canal viajan las migraciones de
+      // versión, que no son contradicciones. Se sigue diciendo que la corrección es en memoria y
+      // que baja a disco cuando algo guarde, que es lo que el usuario necesita saber.
+      lines.push(`                · corregido al leer: ${arreglo}`);
       lines.push('                  (en memoria; el archivo se actualiza en la próxima escritura)');
       warnings++;
     }
@@ -2502,8 +2869,12 @@ Trabajo diario
   context                     Imprime el protocolo resuelto para este proyecto
   status                      Resumen corto del estado
   claim --task-id <id> --title "<t>" [--role backend|frontend]
-  release                     Suelta el claim (al cerrar o al retirarse)
+  release --task-id <id>      Suelta ESA tarea (al cerrar o al retirarse).
+                              El id es obligatorio si hay más de una activa.
+  release --all               Suelta todas las de este proyecto
   exempt --reason "<motivo>" [--hours N] | exempt --clear
+      Cubre ESE motivo y ESTA sesión. Otra sesión la vuelve a declarar o reclama tarea.
+      Sin --hours dura ${duracionHoras(DEFAULT_EXEMPTION_HOURS)}; el techo de --hours es ${MAX_EXEMPTION_HOURS}h.
   timer status | verify --user-id <id> | clear
       status    ¿hay un reloj corriendo, y las horas van a tu nombre?
       verify    registra a quién resuelve "me" en este conector — sin esto el reloj NO arranca

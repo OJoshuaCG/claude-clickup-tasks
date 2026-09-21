@@ -23,12 +23,16 @@ import {
   effectiveDefaults,
   effectiveStatuses,
   roleBehaviour,
+  DEFAULT_EXEMPTION_HOURS,
 } from './config.mjs';
 import { cliInvocation } from './paths.mjs';
 import {
   readState,
   exemptionStatus,
+  activeClaims,
+  claimsOwnedBy,
   claimVerified,
+  claimNameMismatch,
   evidenceHealth,
   timerStatus,
 } from './state.mjs';
@@ -50,10 +54,27 @@ function daysAgo(days) {
 }
 
 /**
+ * Lo que le queda a una exención, dicho en la unidad en la que se piensa.
+ *
+ * Con ventanas de media hora "0.4h" no se lee: nadie planifica en décimas de hora. Por debajo de
+ * la hora se dice en minutos, que es la unidad en la que el usuario decide si le alcanza o no.
+ */
+export function duracionHoras(horas) {
+  if (!Number.isFinite(horas) || horas <= 0) return 'nada';
+  if (horas < 1) return `${Math.max(1, Math.round(horas * 60))} min`;
+  return Number.isInteger(horas) ? `${horas}h` : `${horas.toFixed(1)}h`;
+}
+
+/** Lo que le queda a una exención concreta. Ver `duracionHoras` para el porqué de la unidad. */
+export function restante(ex) {
+  return duracionHoras(Math.max(0, (ex?.limitHours ?? 0) - (ex?.ageHours ?? 0)));
+}
+
+/**
  * Everything the caller needs about "where am I and what are the rules here".
  * Pure data — the markdown rendering is separate so hooks can use the facts without the prose.
  */
-export function buildContext(config, cwd) {
+export function buildContext(config, cwd, sessionId = null) {
   const { key, entry, matchedBy, matchedKey, status } = resolveProject(config, cwd);
   let gitEmailCache;
   let orgCache;
@@ -61,7 +82,12 @@ export function buildContext(config, cwd) {
   const state = readState(matchedKey || key);
   // Project overrides win over the global defaults — see OVERRIDABLE in config.mjs for why.
   const defaults = effectiveDefaults(config, entry);
-  const exemption = exemptionStatus(state, defaults.exemption_hours ?? 8);
+  // La sesión que pregunta decide si una exención vigente es PROPIA o ajena. Ver exemptionStatus.
+  const exemption = exemptionStatus(
+    state,
+    defaults.exemption_hours ?? DEFAULT_EXEMPTION_HOURS,
+    sessionId,
+  );
 
   return {
     // Proyectos ya registrados que comparten la organización del remote. Perezoso: resolverlo
@@ -88,9 +114,19 @@ export function buildContext(config, cwd) {
     identityReady: identityReady(config),
     defaults,
     team: config.team || {},
-    claim: state.claim,
-    // El claim está verificado solo si el harness vio la mutación MCP. Ver `recordMcpWrite`.
-    claimVerified: claimVerified(state),
+    // TODAS las tareas reclamadas del proyecto. Lista, nunca null, y sin ningun campo que
+    // signifique "la actual".
+    //
+    // Antes esto era `claim`, en singular, y ofrecer un unico claim era el error de raiz: cada
+    // consumidor tenia que elegir cual mostrar o cual cerrar, y con dos tareas activas todos
+    // elegian la misma —la que estuviera guardada— aunque el usuario hablara de la otra. Al no
+    // existir el singular, ese error no se puede escribir.
+    claims: activeClaims(state),
+    // Las que ESTA sesion tiene que cerrar. El hook `Stop` exige sobre esto y no sobre `claims`,
+    // que es lo que evita que una sesion quede trabada por la tarea de otra. Ver `claimIsMine`.
+    myClaims: claimsOwnedBy(state, sessionId),
+    // Las de esta sesion sin una sola mutacion MCP registrada. Ver `recordMcpWrite`.
+    unverifiedMine: claimsOwnedBy(state, sessionId).filter((c) => !claimVerified(c)),
     // El cronómetro que ESTA herramienta vio arrancar, y si las horas van a ir a nombre de quien
     // ejecuta o de otra persona. Lo segundo decide si el protocolo siquiera lo ofrece.
     timer: timerStatus(state),
@@ -101,7 +137,8 @@ export function buildContext(config, cwd) {
       if (evidenceCache === undefined) evidenceCache = evidenceHealth();
       return evidenceCache;
     },
-    syncFailed: state.sync_failed ?? null,
+    // Lista, una entrada por tarea que quedo sin reflejar en el tablero.
+    syncFailed: state.sync_failed ?? [],
     exemption,
     // Lazy on purpose: the hooks that fire every turn never read this, and spawning git for a
     // value nobody asked for is a tax paid on every prompt in every repo on the machine.
@@ -356,25 +393,76 @@ export function renderContext(ctx) {
   // ---- Current claim --------------------------------------------------------------------
   out.push('## Estado en este proyecto');
   out.push('');
-  if (ctx.claim) {
+  if (ctx.claims.length) {
+    const varias = ctx.claims.length > 1;
     out.push(
-      `**TAREA RECLAMADA:** \`${ctx.claim.task_id}\` — ${ctx.claim.title ?? 's/título'}` +
-        `${ctx.claim.role ? ` (rol ${ctx.claim.role})` : ''}`,
+      varias
+        ? `**${ctx.claims.length} TAREAS RECLAMADAS EN ESTE PROYECTO.** Conviven a propósito: ` +
+            'ninguna bloquea a la otra y ninguna hay que pausar para trabajar en la otra.'
+        : '**TAREA RECLAMADA:**',
     );
-    out.push(`Reclamada ${ctx.claim.claimed_at} por ${ctx.claim.git_email ?? 's/email'}.`);
     out.push('');
-    out.push('Al terminar, cerrala con `/tarea fin ' + ctx.claim.task_id + '`.');
+    for (const c of ctx.claims) {
+      out.push(
+        `- \`${c.task_id}\` — ${c.title ?? 's/título'}${c.role ? ` (rol ${c.role})` : ''}` +
+          `${c.verified_at ? '' : ' · **sin evidencia MCP todavía**'}`,
+      );
+      out.push(`  Reclamada ${c.claimed_at} por ${c.git_email ?? 's/email'}.`);
+      // Solo cuando difieren. Un título que describe el alcance en vez de nombrar la tarea es
+      // legítimo y frecuente; lo que no puede pasar es que alguien lea la diferencia como
+      // "estado corrupto" y suelte el claim de otro. Decir los dos nombres desarma esa lectura.
+      if (claimNameMismatch(c)) {
+        out.push(
+          `  ⚠ En ClickUp esa tarea se llama **${c.clickup_name}**. No es un error —el título de ` +
+            'arriba describe el trabajo— pero confirmá que sea la tarea que creés antes de tocarla.',
+        );
+      }
+    }
+    out.push('');
+    if (varias) {
+      // LA REGLA QUE EVITA CERRAR LA TAREA EQUIVOCADA, dicha donde se va a leer.
+      out.push(
+        '**Con más de una tarea activa, SIEMPRE nombrá el id.** `/tarea fin` sin id no elige ' +
+          'ninguna: falla y te las lista. No existe "la última" ni "la actual" — el id es el ' +
+          'único dato que distingue una tarea de otra, y escribir el avance de una en la otra ' +
+          'no deja rastro de que pasó.',
+      );
+      out.push('');
+      out.push('Al terminar cada una, cerrala por su id:');
+      for (const c of ctx.claims) out.push(`- \`/tarea fin ${c.task_id}\``);
+    } else {
+      out.push('Al terminar, cerrala con `/tarea fin ' + ctx.claims[0].task_id + '`.');
+    }
   } else if (ctx.exemption.active) {
-    out.push(
-      `**Exención vigente** (${ctx.exemption.ageHours.toFixed(1)}h de ${ctx.exemption.limitHours}h): ` +
-        `${ctx.exemption.reason}`,
-    );
+    // EL MOTIVO VA PRIMERO, y la conclusión va después y CONDICIONADA. No es cosmética.
+    //
+    // Esto decía "Exención vigente. Se puede escribir sin tarea": una luz verde, leída como
+    // permiso, sin nada que empujara a comparar el motivo contra el trabajo en curso. Una sesión
+    // leyó eso y escribió un breaking change en 43 archivos bajo una exención que decía
+    // "generar los commits de trabajo ya cerrado". El mensaje hizo su parte para que pasara.
+    out.push(`**Hay una exención declarada para ESTO:**`);
     out.push('');
-    out.push('Se puede escribir sin tarea mientras dure. No la uses para saltear la búsqueda.');
+    out.push(`> ${ctx.exemption.reason}`);
+    out.push('');
+    out.push(
+      `Si lo que estás por hacer NO es eso, la exención no te cubre: reclamá tarea. ` +
+        `Le quedan ${restante(ctx.exemption)} de ${duracionHoras(ctx.exemption.limitHours)}. ` +
+        'Y no la uses para saltear la búsqueda en ClickUp — eso es lo que produce duplicados.',
+    );
   } else if (ctx.exemption.expired) {
     out.push(
       `**La exención VENCIÓ** (${ctx.exemption.ageHours === Infinity ? 'timestamp ilegible' : `${ctx.exemption.ageHours.toFixed(1)}h`}). ` +
+        `Decía: "${ctx.exemption.reason}". ` +
         'Hay que volver a decidir: reclamar tarea, o declarar la exención de nuevo con el motivo actual.',
+    );
+  } else if (ctx.exemption.foreign) {
+    out.push('**Hay una exención vigente, pero la declaró y la usó OTRA sesión.** Decía:');
+    out.push('');
+    out.push(`> ${ctx.exemption.reason}`);
+    out.push('');
+    out.push(
+      'Un permiso emitido para un trabajo no lo hereda el siguiente. Si lo tuyo es ESO mismo, ' +
+        're-declarala con el motivo actual y sigue; si no lo es, reclamá tarea.',
     );
   } else {
     out.push('**Ninguna tarea reclamada y ninguna exención declarada.**');
@@ -649,7 +737,8 @@ export function renderContext(ctx) {
   out.push('3. **Gana el `INICIO` con timestamp más antiguo.** Si empatan, el `id` de comentario menor.');
   out.push(
     '4. **Si perdiste: PARÁ.** Dejá un comentario `RETIRO`, **no toques el estado** (la tarea es del ' +
-      `otro), soltá el claim con \`${ctx.cli} release\` e informale al usuario quién la tiene.`,
+      `otro), soltá el claim con \`${ctx.cli} release --task-id <id>\` e informale al usuario ` +
+      'quién la tiene.',
   );
   out.push('5. **Si ganaste**, registrá el claim para desbloquear la escritura:');
   out.push('');
@@ -719,8 +808,15 @@ export function renderContext(ctx) {
   out.push('Después: `clickup_create_comment` con el bloque `FIN`, y soltá el claim:');
   out.push('');
   out.push('```bash');
-  out.push(`${ctx.cli} release`);
+  out.push(`${ctx.cli} release --task-id <id>`);
   out.push('```');
+  out.push('');
+  out.push(
+    '**El id va siempre.** Este proyecto puede llevar varias tareas activas a la vez, y con más ' +
+      'de una `release` sin id no elige ninguna: falla y te las lista. Es a propósito — la ' +
+      'alternativa es cerrar la que se reclamó último, que es exactamente el error que nadie ' +
+      'detecta hasta que alguien busca su tarea y la encuentra cerrada por otro.',
+  );
   out.push('');
   out.push(
     '**Si se abandona a mitad, nunca se deja en `in progress`.** Pasa a `on hold` con un ' +
@@ -933,7 +1029,9 @@ function renderTimerClose(ctx) {
     '**En ese orden, y no es cosmético.** Si cerrás primero y el turno se corta en el medio, el ' +
       'reloj queda corriendo sobre una tarea ya cerrada: nadie lo mira, y a la mañana siguiente ' +
       `hay horas de más que ya nadie sabe corregir. Por eso \`${ctx.cli} release\` **se niega a ` +
-      'soltar el claim** mientras haya un cronómetro corriendo.',
+      'soltar el claim** mientras el cronómetro corra **sobre esa misma tarea**. El reloj de ' +
+      'OTRA tarea activa no lo traba: es trabajo en curso que no tiene por qué interrumpirse ' +
+      'para cerrar esta.',
   );
   out.push('');
   out.push(

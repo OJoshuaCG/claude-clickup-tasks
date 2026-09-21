@@ -11,9 +11,60 @@
 import fs from 'node:fs';
 import path from 'node:path';
 import { projectStateFile, statePath, canonicalProjectKey, writeJsonAtomic } from './paths.mjs';
+import { DEFAULT_EXEMPTION_HOURS, MAX_EXEMPTION_HOURS } from './config.mjs';
 
 function emptyState() {
-  return { claim: null, exemption: null, mcp: null, timer: null, sync_failed: null, stop: null };
+  return { claims: [], exemption: null, mcp: null, timer: null, sync_failed: [], stop: null };
+}
+
+/**
+ * Normalizar los claims leidos del disco, y MIGRAR el formato viejo de paso.
+ *
+ * Hasta aca el estado guardaba UN claim (`claim`, objeto o null), porque el protocolo llevaba una
+ * tarea por proyecto. Ahora lleva N, asi que el campo es `claims` (lista). La migracion es
+ * perezosa y silenciosa: se hace al leer, y el archivo queda en el formato nuevo la proxima vez
+ * que algo escriba. No hay paso de migracion que correr ni version que recordar.
+ *
+ * LA LISTA SE LLAVEA POR `task_id`, NO POR SESION, y esa eleccion es el corazon del rediseno.
+ * Una sola sesion tambien puede llevar dos tareas, asi que la sesion es un atributo del claim y
+ * no su identidad. Ademas `task_id` es lo unico que la evidencia del hook `PostToolUse` conoce:
+ * llavear por ahi es lo que hace imposible que una mutacion verifique la tarea equivocada.
+ *
+ * Un `task_id` repetido es un error de escritura, no dos tareas: gana el ultimo y se descarta el
+ * duplicado.
+ */
+function normalizeClaims(parsed) {
+  const crudos = Array.isArray(parsed?.claims)
+    ? parsed.claims
+    : parsed?.claim && typeof parsed.claim === 'object' && !Array.isArray(parsed.claim)
+      ? [parsed.claim]
+      : [];
+  const porTarea = new Map();
+  for (const c of crudos) {
+    if (!c || typeof c !== 'object' || Array.isArray(c)) continue;
+    const id = c.task_id ? String(c.task_id) : null;
+    if (!id) continue;
+    porTarea.set(id, { ...c, task_id: id, session: c.session ?? null });
+  }
+  return [...porTarea.values()];
+}
+
+/**
+ * Las deudas de sincronizacion, siempre como lista.
+ *
+ * Tambien migra: era UN objeto, y con N tareas activas un cierre forzado puede dejar mas de una
+ * deuda. Guardar solo la ultima perderia en silencio justo la evidencia que este registro existe
+ * para no perder.
+ */
+function normalizeSyncFailed(parsed) {
+  const crudo = parsed?.sync_failed;
+  const lista = Array.isArray(crudo) ? crudo : crudo && typeof crudo === 'object' ? [crudo] : [];
+  const porTarea = new Map();
+  for (const d of lista) {
+    if (!d || typeof d !== 'object' || Array.isArray(d)) continue;
+    porTarea.set(d.task_id ? String(d.task_id) : '__sin_id__', d);
+  }
+  return [...porTarea.values()];
 }
 
 export function readState(projectDir) {
@@ -22,7 +73,7 @@ export function readState(projectDir) {
   try {
     const parsed = JSON.parse(fs.readFileSync(file, 'utf8'));
     return {
-      claim: parsed?.claim ?? null,
+      claims: normalizeClaims(parsed),
       exemption: parsed?.exemption ?? null,
       // Evidencia recogida por el hook PostToolUse desde el RESULTADO real de las herramientas
       // MCP. Ver `recordMcpWrite`: esto es lo que separa "el modelo dice que creó la tarea" de
@@ -31,8 +82,8 @@ export function readState(projectDir) {
       // El cronómetro de ClickUp, tal como lo vio el hook `PostToolUse` — nunca como lo anunció
       // el modelo. Ver `recordTimerEvent`.
       timer: parsed?.timer ?? null,
-      // Un cierre de turno que se soltó sin sincronizar. Persiste entre sesiones a propósito.
-      sync_failed: parsed?.sync_failed ?? null,
+      // Cierres de turno que se soltaron sin sincronizar. Persisten entre sesiones a propósito.
+      sync_failed: normalizeSyncFailed(parsed),
       // Contador anti-loop del hook Stop, por sesión.
       stop: parsed?.stop ?? null,
     };
@@ -49,37 +100,97 @@ function writeState(projectDir, state) {
     updated_at: new Date().toISOString(),
     ...state,
   };
+  // `claim` (singular) es el formato viejo. `readState` ya lo migro a `claims`, asi que dejarlo
+  // en el payload escribiria los dos y el proximo lector tendria dos fuentes de verdad.
+  delete payload.claim;
   return writeJsonAtomic(file, payload);
 }
 
+/** Los claims activos del proyecto, siempre una lista. Nunca null, nunca undefined. */
+export function activeClaims(state) {
+  return Array.isArray(state?.claims) ? state.claims : [];
+}
+
+/** El claim de una tarea puntual, o `null`. Es la UNICA forma de llegar a un claim por id. */
+export function findClaim(state, taskId) {
+  if (!taskId) return null;
+  const id = String(taskId);
+  return activeClaims(state).find((c) => c.task_id === id) ?? null;
+}
+
 /**
- * Record a claimed task. This is what unlocks writing.
+ * Este claim, la responsabilidad de esta sesion?
+ *
+ * ESCALERA DE DEGRADACION, y cada peldano se eligio por cual es el peor caso:
+ *
+ *   · el claim no registro sesion  -> es de todos. Es el comportamiento que habia antes de que
+ *     existieran los claims por sesion, y lo conservan los estados viejos ya migrados.
+ *   · no se quien soy              -> no puedo excluir a nadie, asi que me hago cargo. Fallar
+ *     para el lado de exigir de mas nunca pierde trabajo; fallar para el otro lado si.
+ *   · los dos ids estan            -> comparacion exacta.
+ *
+ * Lo usa el hook `Stop` para no exigirle a una sesion la tarea de otra, que es exactamente el
+ * bloqueo cruzado que este rediseno vino a eliminar. El guard NO lo usa: ver `cmdGuard`.
+ */
+export function claimIsMine(claim, sessionId) {
+  if (!claim?.session) return true;
+  if (!sessionId) return true;
+  return claim.session === String(sessionId);
+}
+
+/** Los claims de los que ESTA sesion tiene que rendir cuentas. Ver `claimIsMine`. */
+export function claimsOwnedBy(state, sessionId) {
+  return activeClaims(state).filter((c) => claimIsMine(c, sessionId));
+}
+
+/**
+ * Agregar una tarea reclamada. Esto es lo que desbloquea la escritura.
  *
  * `role` matters as much as the id: `in progress` alone never says whether backend or frontend
  * is holding the task, which is the single most reliable way to misread a shared board.
+ *
+ * AGREGA, no reemplaza. Antes esta funcion pisaba el claim vigente y por eso el CLI tenia que
+ * rechazar la segunda tarea del proyecto: con un solo lugar donde guardar, dos tareas activas
+ * eran indistinguibles de un estado corrupto. Ahora conviven, y la unica colision posible es
+ * reclamar dos veces la MISMA tarea, que se resuelve actualizando la entrada en vez de duplicarla.
+ *
+ * `session` se graba desde quien llama (el CLI, que lee `CLAUDE_CODE_SESSION_ID`). Medido: un
+ * subagente ve el MISMO id que su padre, asi que trabajar en subagentes no fragmenta la
+ * responsabilidad; dos sesiones de Claude Code distintas si tienen ids distintos, que es
+ * justamente la separacion que hace falta.
  */
-export function setClaim(projectDir, claim) {
+export function addClaim(projectDir, claim) {
   const state = readState(projectDir);
-  const taskId = claim.taskId ?? null;
-  state.claim = {
+  const taskId = claim.taskId ? String(claim.taskId) : null;
+  const previo = findClaim(state, taskId);
+  const entrada = {
     task_id: taskId,
-    title: claim.title ?? null,
-    url: claim.url ?? (taskId ? `https://app.clickup.com/t/${taskId}` : null),
-    role: claim.role ?? null,
-    git_email: claim.gitEmail ?? null,
-    claimed_at: claim.claimedAt ?? new Date().toISOString(),
+    title: claim.title ?? previo?.title ?? null,
+    url: claim.url ?? previo?.url ?? (taskId ? `https://app.clickup.com/t/${taskId}` : null),
+    role: claim.role ?? previo?.role ?? null,
+    git_email: claim.gitEmail ?? previo?.git_email ?? null,
+    session: claim.session ? String(claim.session) : (previo?.session ?? null),
+    // El nombre REAL de la tarea en ClickUp, cuando el harness lo vio pasar. Ver `recordTaskName`.
+    // Del argumento, de lo que ya tenía, o de lo que el hook archivó al crearse la tarea —en ese
+    // orden. El tercero es el que cubre el caso normal: crear por MCP y reclamar después.
+    clickup_name:
+      claim.clickupName ?? previo?.clickup_name ?? (taskId ? (state.mcp?.names?.[taskId] ?? null) : null),
+    claimed_at: previo?.claimed_at ?? claim.claimedAt ?? new Date().toISOString(),
     // Se llena SOLO desde `recordMcpWrite`, nunca desde un argumento. Ver `claimVerified`.
-    verified_at: null,
-    verified_by: null,
+    verified_at: previo?.verified_at ?? null,
+    verified_by: previo?.verified_by ?? null,
   };
   // Si el modelo ya creó la tarea por MCP antes de reclamarla —que es el orden natural: primero
   // se crea, después se registra— la evidencia ya está en disco. Buscarla acá evita marcar como
   // "sin verificar" un trabajo que sí se hizo, que sería el falso positivo más molesto posible.
-  const previa = (state.mcp?.writes ?? []).find((w) => taskId && w.task_id === taskId);
-  if (previa) {
-    state.claim.verified_at = previa.at;
-    state.claim.verified_by = previa.tool;
+  if (!entrada.verified_at) {
+    const previa = (state.mcp?.writes ?? []).find((w) => taskId && w.task_id === taskId);
+    if (previa) {
+      entrada.verified_at = previa.at;
+      entrada.verified_by = previa.tool;
+    }
   }
+  state.claims = [...activeClaims(state).filter((c) => c.task_id !== taskId), entrada];
   // Claiming a task retires any standing exemption: the two states are alternatives, and an
   // exemption left behind would keep the lock open after the task is closed.
   state.exemption = null;
@@ -116,17 +227,91 @@ export function recordMcpWrite(projectDir, { tool, taskId, at } = {}) {
   state.mcp.writes = writes.slice(-MAX_EVIDENCIA);
   state.mcp.last_seen_at = cuando;
 
-  // Si esta escritura es sobre la tarea reclamada, el claim queda verificado.
-  if (state.claim && taskId && state.claim.task_id === taskId && !state.claim.verified_at) {
-    state.claim.verified_at = cuando;
-    state.claim.verified_by = tool ?? null;
-  }
-  // Cualquier evidencia sobre la tarea que había quedado sin sincronizar salda la deuda.
-  if (state.sync_failed && taskId && state.sync_failed.task_id === taskId) {
-    state.sync_failed = null;
+  // La evidencia verifica EXACTAMENTE el claim de esa tarea, y ninguno mas.
+  //
+  // Con N tareas activas esta es la linea que garantiza que no se crucen: la unica llave es el
+  // `task_id` que devolvio la herramienta MCP, asi que un comentario en la tarea A no puede
+  // marcar verificada a la B ni aunque B sea la mas reciente. No hay "la actual" que confundir.
+  if (taskId) {
+    for (const c of activeClaims(state)) {
+      if (c.task_id === taskId && !c.verified_at) {
+        c.verified_at = cuando;
+        c.verified_by = tool ?? null;
+      }
+    }
+    // Cualquier evidencia sobre una tarea que había quedado sin sincronizar salda ESA deuda.
+    state.sync_failed = (state.sync_failed ?? []).filter((d) => d.task_id !== taskId);
   }
   writeState(projectDir, state);
   return state.mcp;
+}
+
+/**
+ * Anotar el nombre CANÓNICO de una tarea sobre su claim.
+ *
+ * QUÉ PROBLEMA RESUELVE. El `title` del claim lo escribe el modelo al reclamar, y nada lo ata al
+ * `name` de la tarea en ClickUp. Cuando divergen —porque el modelo escribió el alcance de lo que
+ * va a hacer en vez del nombre de la tarea— un lector posterior no puede distinguir "el título
+ * describe otra cosa" de "el estado está corrupto". Pasó de verdad: una sesión leyó esa
+ * discrepancia, concluyó que el estado era basura vieja, e hizo `release --force` sobre el claim
+ * de otra. Con los dos nombres guardados, la discrepancia se ve como lo que es.
+ *
+ * POR QUÉ NO ENTRA EN `recordMcpWrite`, que es la decisión de diseño que importa acá.
+ *
+ * Es la misma asimetría que separa el cronómetro de las mutaciones: registrar un NOMBRE no es
+ * prueba de que el trabajo quedó registrado en la tarea. Si esto tocara `mcp.writes` o
+ * `verified_at`, renombrar una tarea alcanzaría para abrir el candado y soltar el claim sin
+ * haber comentado ni cerrado nada. Entonces escribe un campo y nada más.
+ *
+ * Devuelve `true` si cambió algo.
+ */
+export function recordTaskName(projectDir, { taskId, name } = {}) {
+  const id = taskId ? String(taskId) : null;
+  const nombre = String(name ?? '').trim();
+  if (!id || !nombre) return false;
+  const state = readState(projectDir);
+
+  // SE GUARDA AUNQUE TODAVÍA NO HAYA CLAIM, y esto no es una precaución: es el caso NORMAL.
+  //
+  // El orden natural del protocolo es crear la tarea por MCP y recién después registrarla con
+  // `claim`. O sea que cuando este hook corre, el claim no existe todavía. Anotar solo sobre los
+  // claims presentes haría que el nombre se perdiera justo en el único momento en que el harness
+  // lo ve pasar. Se archiva acá y `addClaim` lo recoge, igual que hace con la evidencia previa.
+  state.mcp = state.mcp && typeof state.mcp === 'object' ? state.mcp : {};
+  const previos =
+    state.mcp.names && typeof state.mcp.names === 'object' && !Array.isArray(state.mcp.names)
+      ? state.mcp.names
+      : {};
+  // Se reinserta al final para que el recorte por tamaño tire los más viejos: las claves de
+  // string conservan el orden de inserción, y sin el delete un id ya presente quedaría al frente.
+  delete previos[id];
+  previos[id] = nombre;
+  const entradas = Object.entries(previos);
+  state.mcp.names = Object.fromEntries(entradas.slice(-MAX_EVIDENCIA));
+
+  for (const c of activeClaims(state)) {
+    if (c.task_id === id) c.clickup_name = nombre;
+  }
+  writeState(projectDir, state);
+  return true;
+}
+
+/**
+ * ¿El título que escribió el modelo dice otra cosa que el nombre real de la tarea?
+ *
+ * `false` cuando falta cualquiera de los dos: sin nombre canónico no hay con qué comparar, y
+ * afirmar una divergencia que no se puede demostrar es peor que callarse — es exactamente el
+ * tipo de dato engañoso que esta función existe para exponer.
+ *
+ * La comparación normaliza espacios y mayúsculas. Un título que difiere solo en eso es el mismo
+ * título, y marcarlo entrenaría a ignorar el aviso.
+ */
+export function claimNameMismatch(claim) {
+  const canonico = String(claim?.clickup_name ?? '').trim();
+  const propio = String(claim?.title ?? '').trim();
+  if (!canonico || !propio) return false;
+  const norm = (t) => t.toLowerCase().replace(/\s+/g, ' ');
+  return norm(canonico) !== norm(propio);
 }
 
 /** ¿Hay evidencia de una mutación MCP sobre `taskId` posterior a `desde`? */
@@ -141,9 +326,16 @@ export function hasMcpEvidence(state, taskId, desde = null) {
   });
 }
 
-/** Un claim está verificado cuando el harness vio la mutación, no cuando el modelo la anunció. */
-export function claimVerified(state) {
-  return Boolean(state?.claim?.verified_at);
+/**
+ * Un claim está verificado cuando el harness vio la mutación, no cuando el modelo la anunció.
+ *
+ * Recibe UN CLAIM, no el estado. El cambio de firma es a proposito: con N tareas activas,
+ * "esta verificado" sin decir cual es una pregunta sin respuesta, y dejar que se siguiera
+ * llamando con el estado entero habria devuelto en silencio la verificacion de una tarea
+ * cualquiera. Que rompa a quien no se actualizo es el resultado correcto.
+ */
+export function claimVerified(claim) {
+  return Boolean(claim?.verified_at);
 }
 
 /**
@@ -265,20 +457,31 @@ export function clearTimer(projectDir) {
  */
 export function setSyncFailed(projectDir, { taskId, reason } = {}) {
   const state = readState(projectDir);
-  state.sync_failed = {
-    task_id: taskId ?? state.claim?.task_id ?? null,
+  const id = taskId ? String(taskId) : null;
+  const entrada = {
+    task_id: id,
     reason: String(reason ?? '').trim() || 'el turno terminó con una tarea reclamada sin verificar',
     at: new Date().toISOString(),
   };
+  // Se acumulan, una por tarea. Un cierre forzado con dos tareas activas deja DOS deudas, y
+  // guardar solo la ultima borraria la evidencia de que la otra tambien quedo sin reflejar.
+  state.sync_failed = [
+    ...(state.sync_failed ?? []).filter((d) => (d.task_id ?? null) !== id),
+    entrada,
+  ];
   return writeState(projectDir, state);
 }
 
-export function clearSyncFailed(projectDir) {
+/** Saldar deudas de sincronizacion: la de una tarea con `taskId`, o todas sin el. */
+export function clearSyncFailed(projectDir, taskId = null) {
   const state = readState(projectDir);
-  const had = Boolean(state.sync_failed);
-  state.sync_failed = null;
+  const antes = (state.sync_failed ?? []).length;
+  if (!antes) return false;
+  state.sync_failed = taskId
+    ? state.sync_failed.filter((d) => d.task_id !== String(taskId))
+    : [];
   writeState(projectDir, state);
-  return had;
+  return state.sync_failed.length !== antes;
 }
 
 /**
@@ -303,12 +506,45 @@ export function resetStopBlocks(projectDir) {
   return true;
 }
 
-export function clearClaim(projectDir) {
+/**
+ * Soltar UNA tarea, por id. Devuelve el claim que se saco, o `null` si no estaba.
+ *
+ * Exige el id y no tiene default. Es deliberado y es el nucleo del pedido: un `release` que
+ * eligiera "la ultima" cerraria la tarea equivocada la primera vez que hay dos activas, y el
+ * error seria invisible porque el comando igual reportaria exito.
+ */
+export function removeClaim(projectDir, taskId) {
+  if (!taskId) return null;
   const state = readState(projectDir);
-  const had = Boolean(state.claim);
-  state.claim = null;
+  const id = String(taskId);
+  const salido = findClaim(state, id);
+  if (!salido) return null;
+  state.claims = activeClaims(state).filter((c) => c.task_id !== id);
   writeState(projectDir, state);
-  return had;
+  return salido;
+}
+
+/** Soltar TODAS las tareas del proyecto. Devuelve cuantas habia. Solo para limpieza explicita. */
+export function clearAllClaims(projectDir) {
+  const state = readState(projectDir);
+  const habia = activeClaims(state).length;
+  if (!habia) return 0;
+  state.claims = [];
+  writeState(projectDir, state);
+  return habia;
+}
+
+/**
+ * Horas pedidas -> horas que se van a respetar, acotadas al techo.
+ *
+ * Devuelve `{ hours, clamped }`: quien renderiza necesita saber si recortó para poder DECIRLO.
+ * Un recorte silencioso deja al usuario creyendo que tiene una ventana que no tiene.
+ */
+export function clampExemptionHours(hours, defaultHours = DEFAULT_EXEMPTION_HOURS) {
+  const base = Number.isFinite(defaultHours) && defaultHours > 0 ? defaultHours : DEFAULT_EXEMPTION_HOURS;
+  const pedido = Number.isFinite(hours) && hours > 0 ? hours : base;
+  const techo = Math.min(pedido, MAX_EXEMPTION_HOURS);
+  return { hours: techo, clamped: techo < pedido };
 }
 
 /**
@@ -316,15 +552,53 @@ export function clearClaim(projectDir) {
  *
  * It expires, and that is the whole point. A forgotten exemption would disable the lock
  * permanently and silently — precisely the failure the lock exists to prevent.
+ *
+ * NACE SIN SESIÓN, a propósito. `session` queda en `null` y lo escribe el GUARD la primera vez
+ * que la honra — ver `bindExemption`. Estamparlo acá, desde el proceso que declara, sería lo
+ * intuitivo y sería frágil: el CLI corre en el Bash del agente y lee `CLAUDE_CODE_SESSION_ID`,
+ * mientras el guard lee el `session_id` que le llega por stdin, y no hay nada que garantice que
+ * un job en background o un subagente vean el MISMO id por las dos vías. Si difirieran, la
+ * exención nacería ajena a quien la declaró y el guard pediría re-declararla en un bucle.
+ *
+ * Atando en el primer uso, quien escribe el id y quien lo compara son el mismo actor. No pueden
+ * estar en desacuerdo sobre de qué namespace salió.
  */
 export function setExemption(projectDir, reason, hours) {
   const state = readState(projectDir);
+  const { hours: acotadas } = clampExemptionHours(hours);
   state.exemption = {
     reason: String(reason ?? '').trim() || 'sin motivo declarado',
     declared_at: new Date().toISOString(),
-    hours: Number.isFinite(hours) && hours > 0 ? hours : 8,
+    hours: acotadas,
+    session: null,
   };
   return writeState(projectDir, state);
+}
+
+/**
+ * Atar una exención sin dueño a la sesión que la está por usar. La llama el guard, y sólo el guard.
+ *
+ * ESTE ES EL ARREGLO, y la duración es apenas el respaldo. Una exención guardaba un `reason` que
+ * nada comparaba nunca contra el trabajo en curso: quien la tenía la usaba, incluso una sesión
+ * distinta horas después haciendo algo que no se le parecía en nada. Eso es un bearer token, no
+ * un permiso acotado.
+ *
+ * Devuelve `true` si acaba de atarla. Si ya tenía dueño no la toca: una exención se ata UNA vez,
+ * o cualquier sesión nueva se adueñaría de ella con sólo llegar primero, que es el agujero otra vez.
+ */
+export function bindExemption(projectDir, sessionId) {
+  const id = String(sessionId ?? '').trim();
+  if (!id) return false;
+  const state = readState(projectDir);
+  const ex = state.exemption;
+  // `typeof === 'object'` y no sólo truthy: `exemption` puede ser un string si alguien editó el
+  // archivo a mano, y spreadear un string produciría `{0:'p',1:'o',…}` escrito en el estado.
+  // Hoy el guard nunca llega acá con basura —exige un `declared_at` que parsee— pero este módulo
+  // asume que todo lo que lee puede estar roto, y esa regla no se rompe por un caso improbable.
+  if (!ex || typeof ex !== 'object' || Array.isArray(ex) || ex.session) return false;
+  state.exemption = { ...ex, session: id };
+  writeState(projectDir, state);
+  return true;
 }
 
 export function clearExemption(projectDir) {
@@ -335,17 +609,47 @@ export function clearExemption(projectDir) {
   return had;
 }
 
-/** `{ active, expired, ageHours, reason }` for the current exemption. */
-export function exemptionStatus(state, defaultHours = 8) {
+/**
+ * `{ active, expired, foreign, ageHours, reason }` for the current exemption.
+ *
+ * `sessionId` es la sesión que PREGUNTA. Con eso se distinguen tres cosas que antes eran una:
+ *
+ *   expired  → se le acabó el tiempo. Hay que volver a decidir.
+ *   foreign  → sigue vigente en el reloj, pero la declaró y la usó OTRA sesión. Hay que
+ *              re-declararla con el motivo actual antes de que valga acá.
+ *   active   → ni una ni otra.
+ *
+ * DEGRADACIÓN EN ESCALERA. Si no hay id por algún lado —la exención nunca se ató porque el
+ * harness no expone `session_id`, o quien pregunta no lo tiene— no se puede comparar, y una
+ * comparación imposible NO puede leerse como "es ajena": eso trabaría instalaciones enteras.
+ * En ese caso se cae al comportamiento de siempre, vencimiento por edad. Que es exactamente por
+ * qué el default bajó a media hora: cuando la atadura no está disponible, la duración es lo
+ * único que queda acotando el daño.
+ */
+export function exemptionStatus(state, defaultHours = DEFAULT_EXEMPTION_HOURS, sessionId = null) {
   const ex = state?.exemption;
-  if (!ex || !ex.declared_at) return { active: false, expired: false, ageHours: 0, reason: null };
+  if (!ex || !ex.declared_at) {
+    return { active: false, expired: false, foreign: false, ageHours: 0, reason: null, boundTo: null };
+  }
+  const boundTo = String(ex.session ?? '').trim() || null;
+  const actual = String(sessionId ?? '').trim() || null;
+  const foreign = Boolean(boundTo && actual && boundTo !== actual);
   const declared = Date.parse(ex.declared_at);
   if (!Number.isFinite(declared)) {
     // An unreadable timestamp is treated as expired. Failing closed is the right default for
     // something whose only job is to hold a lock open.
-    return { active: false, expired: true, ageHours: Infinity, reason: ex.reason ?? null };
+    return {
+      active: false,
+      expired: true,
+      foreign,
+      ageHours: Infinity,
+      reason: ex.reason ?? null,
+      boundTo,
+    };
   }
-  const limitHours = Number.isFinite(ex.hours) && ex.hours > 0 ? ex.hours : defaultHours;
+  // El techo se aplica también acá, y no sólo al declarar: un `hours` gigante editado a mano en
+  // el archivo de estado saltearía `setExemption` por completo.
+  const { hours: limitHours } = clampExemptionHours(ex.hours, defaultHours);
   const ageHours = (Date.now() - declared) / 3_600_000;
 
   // Una exención fechada en el FUTURO se trata como vencida.
@@ -356,11 +660,15 @@ export function exemptionStatus(state, defaultHours = 8) {
   // — y en los tres casos la respuesta correcta es la misma: fallar cerrado.
   const expired = ageHours < 0 || ageHours >= limitHours;
   return {
-    active: !expired,
+    // Vigente Y propia. Que sean dos condiciones y no una es todo el cambio: el reloj deja de
+    // ser lo único que separa "esto lo autoricé yo, para esto" de "esto lo encontré abierto".
+    active: !expired && !foreign,
     expired,
+    foreign,
     ageHours,
     limitHours,
     reason: ex.reason ?? null,
+    boundTo,
   };
 }
 

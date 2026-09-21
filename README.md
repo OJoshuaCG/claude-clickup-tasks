@@ -270,7 +270,7 @@ Así que el `PreToolUse` deja pasar, sin decir nada, cuando:
 - la decisión está **pospuesta** (ver más abajo);
 - el candado está apagado en la configuración;
 - hay una **tarea reclamada**;
-- hay una **exención vigente**;
+- hay una **exención vigente declarada en esta misma sesión** (ver *La exención* más abajo);
 - lo que se toca **no escribe nada** (un `ls`, un `rg`, un `git status`);
 - lo que se edita es `CLAUDE.md`, `.gitignore`, algo dentro de `.claude/`, o **cualquier archivo
   fuera del proyecto** — configurar el tooling no es el trabajo compartido que el candado protege;
@@ -280,6 +280,51 @@ Una precisión que costó un bug: la exención de `.claude/` se evalúa sobre la
 proyecto y anclada**, con `worktrees/` excluido explícitamente. Antes era un `includes('/.claude/')`
 sobre la ruta absoluta — y como Claude Code crea sus worktrees en `<repo>/.claude/worktrees/<n>/`,
 trabajar en un worktree eximía el **repo entero**: cada archivo de código, no solo la config.
+
+### La exención: un permiso acotado, no un pase del día
+
+`clickup-flow exempt --reason "…"` es la segunda salida del candado: dejás escrito por qué este
+trabajo no amerita tarea y podés escribir. Tiene **dos** límites, y el importante no es el reloj.
+
+**Vale para la sesión que la estrena.** La primera vez que el guard la honra, la exención queda
+atada a esa sesión. Otra sesión no la hereda: la re-declara con el motivo actual, o reclama tarea.
+
+Esto viene de un incidente concreto. Una sesión declaró *"generar los commits del trabajo ya
+cerrado; no se escribe contenido nuevo"* a las 13:47. A las 20:20, otra sesión —trabajo
+completamente distinto: un breaking change en 43 archivos que obligaba a tocar el entorno de cinco
+aplicaciones antes de desplegar— vio el mensaje *"exención vigente, se puede escribir sin tarea"* y
+escribió los 43 archivos sin reclamar nada. El cambio quedó fuera del tablero, y el aviso operativo
+de que había que tocar el entorno sobrevivió solamente dentro del mensaje de un commit.
+
+El defecto no era la duración. Era que la exención guardaba un motivo que **nada comparaba nunca**
+contra el trabajo en curso: un bearer token, no un permiso. Atarla a la sesión cierra la clase de
+falla entera, cualquiera sea la ventana.
+
+*Detalle de implementación que importa:* la ata el **guard**, no el comando que la declara. El CLI
+corre en el Bash del agente y el guard lee el `session_id` que le manda el harness; nada garantiza
+que un job en background o un subagente vean el mismo id por las dos vías. Atando en el primer uso,
+quien escribe el id y quien lo compara son el mismo actor y no pueden discrepar. Y si el harness no
+expone `session_id`, no hay atadura y se cae al vencimiento por edad — una comparación imposible
+nunca se lee como "es ajena", porque eso trabaría instalaciones enteras.
+
+**Se vence sola a los 30 minutos.** Era 8 horas. Una ventana de jornada completa deja de significar
+"permiso para esta tarea puntual" y pasa a significar "permiso para hoy". Media hora, y no menos,
+por la asimetría de costos: vencer corto de más cuesta un comando de cinco segundos —y produce un
+motivo *fresco*, que es lo que se quiere—; vencer largo de más cuesta un cambio desplegable sin
+tarea. Pero una ventana que corta al medio el caso legítimo se esquiva con `--hours 8` de puro
+fastidio, y ahí se perdió el mecanismo entero.
+
+Con la atadura a la sesión, la duración es el **respaldo**: acota el daño de una exención olvidada,
+y cubre las instalaciones donde no hay `session_id` para atar.
+
+**`--hours` tiene techo: 8h.** Por encima de eso la respuesta correcta no es una ventana más larga,
+es una tarea. El techo se aplica al declarar, al leer el archivo de estado —que se puede editar a
+mano— y en `config set`, para que el archivo nunca diga una cosa y la herramienta haga otra.
+
+Un `config.json` que venía de una versión anterior con `exemption_hours: 8` **se migra solo** a
+0.5 la primera vez que se lee, y `doctor` lo dice. Sin eso, bajar el default de fábrica no habría
+cambiado nada en ninguna instalación existente: `fillDefaults` solo rellena claves ausentes, y el 8
+ya estaba escrito literal. Si pusiste otro valor a mano, se respeta: era tu decisión.
 
 ## Un proyecto nuevo: la herramienta pregunta sola
 
@@ -609,6 +654,101 @@ Los tres proyectos guardaban el claim en `.claude/.tarea-actual`, dentro del che
 en `~/.claude/clickup-flow/state/`. **La herramienta no escribe nada en tus repos** salvo que le
 pidas explícitamente la nota en el `CLAUDE.md`.
 
+### 8. N tareas activas por proyecto, y por qué nada elige por defecto
+
+El estado guardaba **un** claim por proyecto, y eso no era una regla de trabajo: era el formato.
+La consecuencia se veía en el caso más normal que hay —dos sesiones de Claude Code en el mismo
+repo, una en la terminal y otra en el IDE— y era mala de dos formas a la vez:
+
+- Reclamar la segunda tarea **fallaba**, y el mensaje sugería pausar la primera en `on hold`. O
+  sea: una tarea perfectamente activa terminaba marcada como detenida, sin estar detenida por
+  nada, solo para que otra pudiera empezar. El tablero dejaba de describir la realidad.
+- El hook `Stop` exigía sobre ese claim único y sin dueño, así que **la sesión A no podía cerrar
+  su turno hasta que la tarea de B estuviera verificada**, y B tampoco. Dos sesiones que no
+  compartían nada quedaban trabadas una por la otra.
+
+Ahora caben N, llaveadas por `task_id`. La sesión que reclamó queda anotada como atributo, y el
+hook `Stop` exige **solo lo propio**. El candado de escritura, en cambio, sigue abriéndose con
+cualquier tarea activa: distinguir sesiones ahí no aporta nada y su peor caso —una sesión
+bloqueada a mitad del trabajo porque los dos ids de sesión no coincidieron— es mucho peor que el
+de exigir de más al cerrar.
+
+**El riesgo nuevo, y cómo se cierra.** Con varias tareas activas aparece la posibilidad de tocar
+la equivocada: terminás la A y cerrás la B porque fue la última que reclamaste. La defensa no es
+una advertencia, es una ausencia: **con más de una activa, ningún comando tiene default**.
+`release` sin `--task-id` no elige ninguna — falla y te lista las candidatas. No existe "la
+actual" ni "la última" en ninguna parte del código, así que ese error no se puede escribir. Con
+una sola activa no hay ambigüedad posible y el id sigue siendo opcional.
+
+Y la evidencia se ata por `task_id`: un comentario en la tarea A **no puede** marcar verificada
+a la B, por construcción y no por cuidado.
+
+Lo que no se movió es el cronómetro. **ClickUp acepta un solo reloj corriendo por persona**, es
+del lado del proveedor, y no hay rediseño local que lo cambie. Lo único que se arregló es que el
+reloj de una tarea ya no traba el `release` de otra: antes, cerrar la A fallaba pidiendo parar un
+reloj que corría sobre la B.
+
+### 9. El claim guarda el nombre real de la tarea, no solo el título que escribió el modelo
+
+El `title` del claim lo escribe el modelo al correr `claim --title`, y nada lo ataba al `name` de
+la tarea en ClickUp. Cuando divergen —porque el título describe *el trabajo* en vez de nombrar *la
+tarea*— un lector posterior no puede distinguir "esto describe otra cosa" de "el estado está
+corrupto".
+
+No es hipotético. El 2026-09-21 una sesión leyó un claim cuyo título no reconocía contra el
+tablero, concluyó que era estado viejo restaurado por un resume, e hizo `release --force` sobre el
+claim de otra sesión. El resultado fue inocuo por casualidad —la tarea ya estaba `complete`, era un
+candado huérfano— pero el dato que la confundió era real.
+
+Ahora el harness archiva el nombre canónico y `status`, `doctor`, `context` y el aviso de
+`SessionStart` muestran los dos **cuando difieren**, y callan cuando coinciden: un aviso que
+aparece siempre se deja de leer.
+
+**De dónde sale el nombre, que es la parte que no es obvia.** El CLI no puede preguntárselo a
+ClickUp: no tiene token, y esa separación es la arquitectura entera. Y la respuesta de las
+mutaciones tampoco lo trae — `clickup_create_task` y `clickup_update_task` devuelven
+`{success, task_id, custom_id, task_url}` y nada más. El único que devuelve `name` es
+`clickup_get_task`, que **no está** en `MCP_WRITE_TOOLS` y no debe estarlo: una lectura no es
+prueba de que el trabajo se registró.
+
+Donde sí está es en el **`tool_input`**: es el nombre que la llamada le *puso* a la tarea. Sigue
+siendo evidencia que entrega el harness, no algo que el modelo nos cuenta aparte.
+
+Y registrar un nombre **nunca** cuenta como evidencia de trabajo. Si contara, renombrar una tarea
+alcanzaría para abrir el candado y soltar el claim sin haber comentado ni cerrado nada — la misma
+asimetría por la que el cronómetro tiene su propio registro.
+
+**Hueco conocido, documentado y no resuelto:** una tarea **preexistente** que se reclama sin
+crearla ni renombrarla no pasa su nombre por ningún matcher, así que se queda sin `clickup_name` y
+la divergencia no se puede detectar. Cubrirlo exige un matcher de solo lectura para
+`clickup_get_task`, o sea un hook más en el `settings.json` de cada instalación. Es una decisión
+aparte y no se tomó de contrabando.
+
+### 10. La evidencia estaba coja, y solo se vio validando contra el tablero real
+
+Dos defectos que ninguna lectura de código encontró. Se vieron mirando el registro después de una
+sesión real: se habían hecho **2 `create_task`, 4 `create_comment` y 4 `update_task`**, y el
+registro guardaba **solo los 4 `update_task`**. Las tres herramientas estaban en el matcher.
+
+- **Un `tool_response` que llega como string con JSON adentro se descartaba entero.** El extractor
+  aplicaba `visitar()` —que sabe parsear eso— solo a la *entrada*, y a la *respuesta* le aplicaba
+  `raiz()`, que abre con `if (typeof obj !== 'object') return`. Consecuencia:
+  `clickup_create_task` no dejaba evidencia **nunca**, porque su id existe solo en la respuesta
+  (cuando se la llama, la tarea todavía no existe y la entrada no puede nombrarla).
+- **`entity_id` no se reconocía como id de tarea.** La herramienta vigente
+  `clickup_create_comment` nombra así su objetivo; `task_id` lo usa solo la deprecada
+  `clickup_create_task_comment`. Ningún comentario dejaba evidencia. No alcanzaba con agregar la
+  clave al set: la misma apunta a listas y vistas según `entity_type`, así que se acepta solo
+  cuando el tipo es `task` o no viene (el default del conector).
+
+El costo era caro y silencioso: una tarea creada y comentada, sin ningún `update_task`, quedaba
+"sin sincronizar" para siempre —`release` se negaba y `Stop` bloqueaba el turno—. Lo tapaba que el
+protocolo siempre hace un `update_task` para poner `in progress`.
+
+La lección de método, que vale más que el parche: **el matcher estaba bien y la lógica parecía
+bien; lo que falló fue la forma del dato.** Eso no se descubre leyendo, se descubre mirando lo que
+quedó registrado después de usar la herramienta de verdad.
+
 ---
 
 ## Lo que se consideró y se descartó
@@ -643,9 +783,14 @@ parecido de nombre. **Descartado:** es justo el error que la herramienta existe 
 parecido de apellido no es evidencia, y una asignación silenciosa al colega equivocado se descubre
 semanas después. Si hay ambigüedad, decide el humano.
 
-**Hacer `exemption_hours` y el candado configurables por proyecto.** **Descartado:** son
-propiedades de la persona y de la máquina, no del tablero. Solo se pueden overridear por proyecto
-las cinco cosas que de verdad cambian entre tableros.
+**Hacer `exemption_hours` y el candado configurables por proyecto.** **Descartado, pero por un
+argumento distinto al original.** Decía acá que son "propiedades de la persona y de la máquina, no
+del tablero", y eso no sobrevive al contraejemplo obvio: un repo de producción con breaking changes
+no quiere la misma ventana que un scratchpad, y eso es una propiedad del **repo**. El motivo real
+por el que sigue afuera es que dejó de importar: desde que la exención se ata a la sesión que la
+usa, la duración es un respaldo y no la frontera, y una ventana por proyecto sería una perilla más
+para afinar algo que ya casi no decide nada. Solo se overridean por proyecto las seis cosas que de
+verdad cambian entre tableros.
 
 **Detectar que `/mnt/c/...` y `C:\...` son la misma carpeta** (WSL y Windows). **Descartado a
 propósito:** son dos instalaciones distintas de Claude Code, con dos `settings.json` y dos
@@ -674,7 +819,7 @@ Un archivo, `~/.claude/clickup-flow/config.json`, pensado para leerse y editarse
     "end_date_field": "description",
     "search_window_days": 30,
     "block_writes_without_task": true,
-    "exemption_hours": 8
+    "exemption_hours": 0.5
   },
   "projects": {
     "/home/alex/code/mensajeria-api": {
@@ -929,6 +1074,12 @@ Los hooks se leen al arrancar la sesión. Reiniciá Claude Code y corré `clicku
 Es el candado haciendo su trabajo. Dos salidas legítimas: reclamar la tarea, o declarar la
 exención con su motivo (`clickup-flow exempt --reason "…"`). Si querés apagarlo del todo:
 `clickup-flow config set --key defaults.block_writes_without_task --value false`.
+
+**"Dice que hay una exención vigente pero que es de otra sesión."**
+Es el diseño, no un bug. Una exención se emite para **un trabajo concreto** y la consume la sesión
+que la estrena; la siguiente no la hereda. Si lo que estás haciendo es ese mismo trabajo,
+re-declarala con el motivo actual y seguís. Si es otra cosa —y casi siempre lo es— esa es
+exactamente la escritura que tenía que frenarse.
 
 **"No encuentra a mi usuario de ClickUp."**
 El instalador solo puede consultar la API si le das un token personal, porque el conector que usa

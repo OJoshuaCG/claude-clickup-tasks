@@ -21,13 +21,28 @@ Después cargá la skill `clickup-task-flow` y ejecutá el modo que corresponda.
 | --- | --- | --- |
 | `<descripción del trabajo>` | **RECLAMAR** | Decidir si amerita tarea, buscarla, y tomarla o crearla |
 | `<id de ClickUp>` | **RECLAMAR** | Ir directo a esa tarea y tomarla |
-| `fin` / `fin <id>` / `fin <id> <notas>` | **CERRAR** | Cerrar la tarea reclamada |
+| `fin <id>` / `fin <id> <notas>` | **CERRAR** | Cerrar esa tarea. **Con más de una activa, el id es obligatorio** |
 | `pausa <motivo>` | **PAUSAR** | Dejarla en `on hold` diciendo dónde quedó |
 | `bloqueo <id> <motivo>` | **BLOQUEAR CON PEDIDO** | `on hold` + pedido concreto al otro rol, con notificación |
 | `nueva <descripción>` | **RECLAMAR** | Igual que reclamar: trabajo nacido en este repo |
 | `handoff` | **PENDIENTES DEL OTRO ROL** | Listar lo que espera trabajo del otro lado |
 | `bloqueos` | **DEVUELTAS / TRABADAS** | Listar `on hold` con un pedido concreto adentro |
 | `estado` (o vacío) | **CONSULTAR** | Qué hay en curso, quién lo tiene y qué está libre |
+
+---
+
+## Varias tareas a la vez: se puede, y no hay que pausar ninguna
+
+**Este proyecto admite N tareas reclamadas al mismo tiempo**, sean de una sesión o de varias
+trabajando en el mismo repositorio. Conviven: ninguna bloquea a la otra, ninguna hay que dejar en
+`on hold` para empezar la siguiente, y cada una se cierra por su cuenta.
+
+A cambio, **cuando hay más de una, el id deja de ser opcional en todo lo que mute una tarea**.
+`/tarea fin` sin id no cierra "la última": falla y te lista las activas. Es deliberado — un default
+ahí cerraría la tarea equivocada y el comando te diría que salió bien, que es el peor resultado
+posible.
+
+Con **una sola** activa no hay ambigüedad y el id sigue siendo opcional.
 
 ---
 
@@ -78,14 +93,21 @@ por qué: el reloj corre a nombre del dueño del token, no del que ejecuta.
 
 **8. Recién ahora** empezá a trabajar. Confirmale al usuario que quedó reservada, con el id y la URL.
 
+> **`--title` es el NOMBRE de la tarea, no el resumen de lo que vas a hacer.** Si escribís ahí el
+> alcance ("arreglar el timeout del webhook") cuando la tarea se llama otra cosa, otra sesión que
+> lea ese claim va a ver una discrepancia contra el tablero y puede concluir que el estado está
+> corrupto. Pasó. Para las tareas que creás vos el harness archiva el nombre real solo y avisa
+> cuando difieren; para las preexistentes no puede, así que ahí depende de vos.
+
 ---
 
 ## Modo CERRAR
 
 1. Traé la tarea y verificá que esté en `in progress`. Si está en otro estado, **decilo** en vez de
    forzar: cerrar algo que nadie reclamó suele significar que se salteó el paso de reclamar.
-   **Si hay un cronómetro corriendo, paralo ACÁ**, antes de tocar el estado — `release` no va a
-   dejar soltar el claim con el reloj andando, y por buenos motivos.
+   **Si hay un cronómetro corriendo sobre ESTA tarea, paralo ACÁ**, antes de tocar el estado —
+   `release` no va a dejar soltar el claim con su propio reloj andando, y por buenos motivos. El
+   reloj de otra tarea activa no traba este cierre: es trabajo en curso que no hay que interrumpir.
 2. Si el proyecto tiene handoff, **la pregunta obligatoria**: ¿esto necesita trabajo del otro rol?
    No alcanza con que *vos* no lo hayas tocado — hay que poder afirmar que **nada de lo que el otro
    lado ya consume cambió** (rutas, forma de la respuesta, códigos de error, campos obligatorios).
@@ -101,8 +123,9 @@ por qué: el reloj corre a nombre del dueño del token, no del que ejecuta.
 {{CLI}} release --task-id <id>
 ```
 
-El id no es decorativo: si otra sesión de Claude reclamó algo en este mismo repo, soltar sin
-decir cuál la dejaría bloqueada a mitad del trabajo. Con el id, el comando se niega y te avisa.
+El id no es decorativo. Con varias tareas activas —lo normal cuando hay dos sesiones en el mismo
+repo, o una sola llevando dos frentes— soltar sin decir cuál cerraría una que seguía en curso y
+dejaría la otra abierta sin nadie encima. Por eso el comando **se niega** en vez de adivinar.
 
 **Nunca pongas `reviewed`** salvo que `context` lo declare como estado usado en este proyecto.
 

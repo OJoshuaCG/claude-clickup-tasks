@@ -78,7 +78,7 @@ function escribirConfig(extra = {}) {
           block_writes_without_task: true,
           ask_new_projects: true,
           snooze_days: 7,
-          exemption_hours: 8,
+          exemption_hours: 0.5,
           track_time: false,
         },
         projects: {
@@ -329,14 +329,14 @@ mutacion();
     /timer clear/.test(r.err) && /--force/.test(r.err),
     'con las dos salidas: reconciliar si ya se paró por fuera, o soltar igual a propósito',
   );
-  assert(Boolean(leerEstado()?.claim), 'y el claim NO se soltó');
+  assert((leerEstado()?.claims ?? []).length === 1, 'y el claim NO se soltó');
 }
 
 {
   parar(entradaCerrada());
   const r = cli(['release']);
   assert(r.code === 0, 'con el reloj parado, `release` suelta normalmente', `exit ${r.code}`);
-  assert(!leerEstado()?.claim, 'el claim quedó liberado');
+  assert((leerEstado()?.claims ?? []).length === 0, 'el claim quedó liberado');
   assert(!leerEstado()?.timer, 'y el cronómetro ya parado se limpia con él');
 }
 

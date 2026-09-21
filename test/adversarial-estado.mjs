@@ -106,12 +106,129 @@ check('hours negativo o cero no vuelve la exención eterna', () => {
   }
 });
 
-check('hours absurdamente grande sigue siendo un número finito', () => {
+check('hours absurdamente grande se acota al techo, no queda eterna', () => {
   writeRawState({
     exemption: { reason: 'x', declared_at: new Date().toISOString(), hours: 1e18 },
   });
   const ex = S.exemptionStatus(S.readState(PROJ), 8);
   assert(Number.isFinite(ex.ageHours), 'ageHours no es finito');
+  // El test viejo se conformaba con que ageHours fuera finito, y eso dejaba pasar lo importante:
+  // `limitHours` valía 1e18, o sea el candado abierto por el resto del universo. Un archivo de
+  // estado editado a mano saltea `setExemption` por completo, así que el techo tiene que
+  // aplicarse TAMBIÉN al leer.
+  assert(
+    ex.limitHours <= C.MAX_EXEMPTION_HOURS,
+    `limitHours no se acotó al techo: ${ex.limitHours}`,
+  );
+});
+
+console.log('\nSTATE: LA EXENCIÓN ESTÁ ATADA A UNA SESIÓN\n');
+
+check('una exención nace sin dueño: la ata quien la usa, no quien la declara', () => {
+  S.setExemption(PROJ, 'motivo', 1);
+  const ex = S.readState(PROJ).exemption;
+  assert(ex.session === null, `nació atada a ${ex.session}`);
+});
+
+check('bindExemption la ata la primera vez y no la reata después', () => {
+  S.setExemption(PROJ, 'motivo', 1);
+  assert(S.bindExemption(PROJ, 's1') === true, 'no ató la primera vez');
+  assert(S.readState(PROJ).exemption.session === 's1', 'no guardó el id');
+  // Si una sesión nueva pudiera reatarla, alcanzaría con llegar primero para adueñarse de la
+  // exención de otro. Sería el mismo agujero con un paso más.
+  assert(S.bindExemption(PROJ, 's2') === false, 're-ató una exención que ya tenía dueño');
+  assert(S.readState(PROJ).exemption.session === 's1', 's2 se quedó con la exención de s1');
+});
+
+check('bindExemption no spreadea basura editada a mano', () => {
+  // Un `exemption` que es un string spreadeado daría {0:'p',1:'o',…} escrito en el estado.
+  for (const basura of ['porque sí', 42, ['x'], true]) {
+    writeRawState({ exemption: basura });
+    assert(S.bindExemption(PROJ, 's1') === false, `ató sobre ${JSON.stringify(basura)}`);
+  }
+});
+
+check('sin id de sesión no ata nada, y no revienta', () => {
+  S.setExemption(PROJ, 'motivo', 1);
+  for (const id of [null, undefined, '', '   ']) {
+    assert(S.bindExemption(PROJ, id) === false, `ató con id ${JSON.stringify(id)}`);
+  }
+  assert(S.readState(PROJ).exemption.session === null, 'quedó atada a basura');
+});
+
+check('la sesión que la ató la sigue teniendo vigente', () => {
+  S.setExemption(PROJ, 'motivo', 1);
+  S.bindExemption(PROJ, 's1');
+  const ex = S.exemptionStatus(S.readState(PROJ), 8, 's1');
+  assert(ex.active, 'la sesión dueña no la pudo usar');
+  assert(!ex.foreign, 'marcó como ajena la exención propia');
+});
+
+check('OTRA sesión no la hereda: es el agujero que este cambio cierra', () => {
+  S.setExemption(PROJ, 'commitear trabajo ya cerrado', 8);
+  S.bindExemption(PROJ, 's1');
+  // Misma exención, dentro de la ventana del reloj, otra sesión. Antes esto devolvía active y
+  // el candado dejaba pasar 43 archivos de un breaking change que no tenía nada que ver.
+  const ex = S.exemptionStatus(S.readState(PROJ), 8, 's2');
+  assert(ex.foreign, 'no detectó que la exención era de otra sesión');
+  assert(!ex.active, 'una sesión ajena heredó la exención');
+  assert(!ex.expired, 'la marcó vencida cuando el problema es otro');
+  assert(ex.reason === 'commitear trabajo ya cerrado', 'perdió el motivo, que es lo que hay que leer');
+});
+
+check('sin id de quien pregunta se cae al vencimiento por edad, no a "es ajena"', () => {
+  S.setExemption(PROJ, 'motivo', 1);
+  S.bindExemption(PROJ, 's1');
+  // Un harness que no expone session_id no puede trabar la herramienta entera. La comparación
+  // imposible NO se lee como "es de otro": se cae a la escalera de siempre.
+  const ex = S.exemptionStatus(S.readState(PROJ), 8, null);
+  assert(!ex.foreign, 'sin id para comparar la dio por ajena');
+  assert(ex.active, 'sin id para comparar trabó una exención válida');
+});
+
+check('una exención sin atar la puede usar cualquiera', () => {
+  S.setExemption(PROJ, 'motivo', 1);
+  const ex = S.exemptionStatus(S.readState(PROJ), 8, 's9');
+  assert(!ex.foreign, 'una exención sin dueño salió ajena');
+  assert(ex.active, 'una exención sin dueño no abrió el candado');
+});
+
+check('vencida Y ajena sigue siendo vencida: el reloj manda', () => {
+  S.setExemption(PROJ, 'motivo', 1);
+  S.bindExemption(PROJ, 's1');
+  const st = S.readState(PROJ);
+  st.exemption.declared_at = new Date(Date.now() - 2 * 3_600_000).toISOString();
+  writeRawState(st);
+  const ex = S.exemptionStatus(S.readState(PROJ), 8, 's2');
+  assert(ex.expired, 'perdió el vencimiento por mirar la sesión');
+  assert(!ex.active, 'abrió el candado con una exención vencida');
+});
+
+console.log('\nSTATE: EL TECHO DE --hours\n');
+
+check('setExemption acota al techo lo que le pidan', () => {
+  S.setExemption(PROJ, 'motivo', 99999);
+  assert(
+    S.readState(PROJ).exemption.hours === C.MAX_EXEMPTION_HOURS,
+    `guardó ${S.readState(PROJ).exemption.hours}h`,
+  );
+});
+
+check('clampExemptionHours avisa cuando recorta', () => {
+  // Recortar en silencio deja al usuario creyendo que tiene una ventana que no tiene.
+  assert(S.clampExemptionHours(99999).clamped === true, 'no avisó que recortó');
+  assert(S.clampExemptionHours(1).clamped === false, 'dijo que recortó algo que entraba');
+  assert(S.clampExemptionHours(1).hours === 1, 'cambió un valor que entraba');
+});
+
+check('horas inválidas caen al default, no al techo ni a infinito', () => {
+  for (const basura of [null, undefined, NaN, -3, 0, 'ocho', Infinity]) {
+    const { hours } = S.clampExemptionHours(basura, C.DEFAULT_EXEMPTION_HOURS);
+    assert(
+      hours === C.DEFAULT_EXEMPTION_HOURS,
+      `${JSON.stringify(basura)} dio ${hours} en vez del default`,
+    );
+  }
 });
 
 check('una exención justo en el límite está vencida, no vigente', () => {
@@ -123,38 +240,37 @@ check('una exención justo en el límite está vencida, no vigente', () => {
 
 console.log('\nSTATE: CLAIM\n');
 
-check('setClaim retira cualquier exención vigente', () => {
+check('addClaim retira cualquier exención vigente', () => {
   S.setExemption(PROJ, 'motivo', 8);
-  S.setClaim(PROJ, { taskId: 'T1', title: 'x' });
+  S.addClaim(PROJ, { taskId: 'T1', title: 'x' });
   const st = S.readState(PROJ);
-  assert(st.claim, 'no guardó el claim');
+  assert(S.findClaim(st, 'T1'), 'no guardó el claim');
   assert(!st.exemption, 'dejó la exención junto al claim: el candado tendría dos llaves');
 });
 
 check('un claim con campos ausentes no rompe nada', () => {
-  S.setClaim(PROJ, { taskId: 'T2' });
-  const st = S.readState(PROJ);
-  assert(st.claim.task_id === 'T2', 'perdió el id');
-  assert(st.claim.url && st.claim.url.includes('T2'), 'no derivó la URL');
-  assert(st.claim.claimed_at, 'sin timestamp');
+  S.addClaim(PROJ, { taskId: 'T2' });
+  const c = S.findClaim(S.readState(PROJ), 'T2');
+  assert(c.task_id === 'T2', 'perdió el id');
+  assert(c.url && c.url.includes('T2'), 'no derivó la URL');
+  assert(c.claimed_at, 'sin timestamp');
 });
 
 check('un título absurdamente largo no corrompe el archivo', () => {
-  S.setClaim(PROJ, { taskId: 'T3', title: 'x'.repeat(100000) });
-  const st = S.readState(PROJ);
-  assert(st.claim.title.length === 100000, 'truncó o perdió el título');
+  S.addClaim(PROJ, { taskId: 'T3', title: 'x'.repeat(100000) });
+  assert(S.findClaim(S.readState(PROJ), 'T3').title.length === 100000, 'truncó o perdió el título');
 });
 
 check('caracteres peligrosos en el título sobreviven', () => {
   const raro = 'con "comillas" y \\backslash y \n salto y ñ 中 🎯';
-  S.setClaim(PROJ, { taskId: 'T4', title: raro });
-  assert(S.readState(PROJ).claim.title === raro, 'se corrompió el título');
+  S.addClaim(PROJ, { taskId: 'T4', title: raro });
+  assert(S.findClaim(S.readState(PROJ), 'T4').title === raro, 'se corrompió el título');
 });
 
 check('dropState borra y readState sigue funcionando', () => {
   S.dropState(PROJ);
   const st = S.readState(PROJ);
-  assert(st.claim === null && st.exemption === null, 'quedó estado');
+  assert(S.activeClaims(st).length === 0 && st.exemption === null, 'quedó estado');
 });
 
 console.log('\nCONFIG: ARCHIVOS CORRUPTOS Y SECCIONES CON TIPOS MAL\n');
@@ -302,7 +418,10 @@ check('un override no puede meter una clave que no es overridable', () => {
   });
   // El candado y la duración de la exención son de la máquina, no del tablero.
   assert(d.block_writes_without_task === true, 'un override apagó el candado');
-  assert(d.exemption_hours === 8, 'un override cambió la duración de la exención');
+  assert(
+    d.exemption_hours === C.DEFAULT_EXEMPTION_HOURS,
+    'un override cambió la duración de la exención',
+  );
 });
 
 check('effectiveStatuses cae a los defaults con basura', () => {
@@ -476,6 +595,62 @@ check('saveConfig no deja .tmp huérfanos', () => {
   for (let i = 0; i < 5; i++) C.saveConfig(config);
   const tmps = fs.readdirSync(P.toolHome()).filter((f) => f.includes('.tmp-'));
   assert(tmps.length === 0, `quedaron ${tmps.length} temporales`);
+});
+
+console.log('\nCONFIG: MIGRACIÓN v1 -> v2 (la ventana de la exención)\n');
+
+check('un config viejo con exemption_hours: 8 se migra al leerlo', () => {
+  // ESTE ES EL TEST QUE FALTABA, y sin él el cambio de default no arreglaba nada.
+  // `fillDefaults` sólo rellena claves AUSENTES, así que un archivo que YA tiene el 8 escrito
+  // se queda con el 8 para siempre — o sea, en todas las máquinas donde el problema ocurre.
+  writeRawConfig({ version: 1, defaults: { exemption_hours: 8 } });
+  const { config, normalised } = C.loadConfig();
+  assert(
+    config.defaults.exemption_hours === C.DEFAULT_EXEMPTION_HOURS,
+    `no migró: quedó en ${config.defaults.exemption_hours}`,
+  );
+  assert(
+    normalised.some((n) => n.includes('exemption_hours')),
+    'migró en silencio: se arregla Y se dice',
+  );
+});
+
+check('un config sin version también se migra', () => {
+  writeRawConfig({ defaults: { exemption_hours: 8 } });
+  const { config } = C.loadConfig();
+  assert(config.defaults.exemption_hours === C.DEFAULT_EXEMPTION_HOURS, 'no migró sin version');
+});
+
+check('la migración NO pisa un valor que el usuario eligió', () => {
+  // Quien puso 3 eligió 3. Una migración que le pisa la elección es un bug con buenas
+  // intenciones, y de los peores: el usuario no se entera de que le cambiaron su decisión.
+  writeRawConfig({ version: 1, defaults: { exemption_hours: 3 } });
+  const { config, normalised } = C.loadConfig();
+  assert(config.defaults.exemption_hours === 3, 'pisó una elección del usuario');
+  assert(!normalised.some((n) => n.includes('exemption_hours')), 'dijo que migró algo que no tocó');
+});
+
+check('un config ya en v2 con 8 escrito a mano se respeta', () => {
+  writeRawConfig({ version: 2, defaults: { exemption_hours: 8 } });
+  const { config } = C.loadConfig();
+  assert(config.defaults.exemption_hours === 8, 'volvió a migrar algo ya migrado');
+});
+
+check('la migración llega al disco cuando algo guarda', () => {
+  writeRawConfig({ version: 1, defaults: { exemption_hours: 8 } });
+  const { config } = C.loadConfig();
+  C.saveConfig(config);
+  const enDisco = JSON.parse(fs.readFileSync(P.configPath(), 'utf8'));
+  assert(
+    enDisco.defaults.exemption_hours === C.DEFAULT_EXEMPTION_HOURS,
+    `en disco quedó ${enDisco.defaults.exemption_hours}`,
+  );
+  assert(enDisco.version === C.CONFIG_VERSION, 'no selló la versión nueva');
+});
+
+check('el default de fábrica es media hora, no una jornada', () => {
+  assert(C.DEFAULT_EXEMPTION_HOURS === 0.5, `el default es ${C.DEFAULT_EXEMPTION_HOURS}`);
+  assert(C.defaultConfig().defaults.exemption_hours === C.DEFAULT_EXEMPTION_HOURS, 'no lo usa');
 });
 
 console.log(`\n${pass} pasaron, ${fail} fallaron\n`);

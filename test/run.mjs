@@ -100,7 +100,16 @@ fs.writeFileSync(
   JSON.stringify(PRE_EXISTING_SETTINGS, null, 2),
 );
 
-const env = { ...process.env, CLAUDE_CONFIG_DIR: fakeClaude, NO_COLOR: '1' };
+// `CLAUDE_CODE_SESSION_ID` se pisa a propósito. Si estos tests corren DENTRO de una sesión de
+// Claude Code, la variable del entorno real se filtraría a los subprocesos y las aserciones sobre
+// la atadura de la exención pasarían o fallarían según quién ejecutó la suite. Vacía significa
+// "sin sesión", y cada test que necesite una la manda explícita por el payload del hook.
+const env = {
+  ...process.env,
+  CLAUDE_CONFIG_DIR: fakeClaude,
+  NO_COLOR: '1',
+  CLAUDE_CODE_SESSION_ID: '',
+};
 
 function run(args, opts = {}) {
   return execFileSync('node', args, {
@@ -811,6 +820,96 @@ check('una exención vencida vuelve a bloquear, y lo dice', () => {
   assert(r.stderr.includes('VENCIÓ'), 'no dijo que la exención venció');
   assert(r.stderr.includes('typo'), 'no recordó el motivo que tenía');
   cli(['exempt', '--clear', '--cwd', projectA], { cwd: projectA });
+});
+
+/** El archivo de estado de un proyecto, tal como quedó en disco. */
+function estadoDe(proyecto) {
+  const dir = path.join(fakeClaude, 'clickup-flow', 'state');
+  const file = fs
+    .readdirSync(dir)
+    .map((f) => path.join(dir, f))
+    .find((f) => {
+      try {
+        return JSON.parse(fs.readFileSync(f, 'utf8')).project === canonicalProjectKey(proyecto);
+      } catch {
+        return false;
+      }
+    });
+  assert(file, `no encontré el estado de ${proyecto}`);
+  return JSON.parse(fs.readFileSync(file, 'utf8'));
+}
+
+check('una exención declarada en una sesión NO la hereda la siguiente', () => {
+  // EL INCIDENTE, en miniatura y de punta a punta.
+  //
+  // Una sesión declaró "commitear trabajo ya cerrado" a las 13:47. Seis horas y media después,
+  // otra sesión escribió un breaking change en 43 archivos y el candado la dejó pasar, porque el
+  // reloj todavía no había llegado a las 8h. El motivo estaba escrito y NADA lo comparaba nunca
+  // contra el trabajo en curso: eso es un bearer token, no un permiso acotado.
+  cli(['exempt', '--reason', 'commitear trabajo ya cerrado', '--cwd', projectA], { cwd: projectA });
+
+  const escribir = (sessionId) =>
+    hook('guard', {
+      cwd: projectA,
+      session_id: sessionId,
+      tool_name: 'Write',
+      tool_input: { file_path: path.join(projectA, 'app.js') },
+    });
+
+  assertEqual(escribir('s1').code, 0, 'la sesión que la estrena no pudo escribir');
+  assertEqual(estadoDe(projectA).exemption.session, 's1', 'no la ató a quien la usó primero');
+  assertEqual(escribir('s1').code, 0, 'la misma sesión perdió su propia exención');
+
+  const otra = escribir('s2');
+  assertEqual(otra.code, 2, 'otra sesión heredó la exención: el agujero sigue abierto');
+  assert(otra.stderr.includes('OTRA SESIÓN'), `no dijo de quién era: ${otra.stderr}`);
+  assert(
+    otra.stderr.includes('commitear trabajo ya cerrado'),
+    'no mostró el motivo, que es lo único con lo que se puede decidir si te cubre',
+  );
+  // Y la salida tiene que estar a la vista: bloquear sin decir cómo seguir es una pared.
+  assert(otra.stderr.includes('exempt --reason'), 'no ofreció re-declararla');
+  cli(['exempt', '--clear', '--cwd', projectA], { cwd: projectA });
+});
+
+check('re-declararla en la sesión nueva vuelve a abrir el candado', () => {
+  cli(['exempt', '--reason', 'motivo viejo', '--cwd', projectA], { cwd: projectA });
+  const escribir = (sessionId) =>
+    hook('guard', {
+      cwd: projectA,
+      session_id: sessionId,
+      tool_name: 'Write',
+      tool_input: { file_path: path.join(projectA, 'app.js') },
+    });
+  escribir('s1');
+  assertEqual(escribir('s2').code, 2, 'no bloqueó a la sesión ajena');
+
+  // Re-declarar no es un trámite: produce un motivo NUEVO, fechado ahora, y sin dueño otra vez.
+  cli(['exempt', '--reason', 'motivo actual y concreto', '--cwd', projectA], { cwd: projectA });
+  assertEqual(escribir('s2').code, 0, 'no destrabó después de re-declararla');
+  assertEqual(estadoDe(projectA).exemption.session, 's2', 'no se ató a la sesión nueva');
+  cli(['exempt', '--clear', '--cwd', projectA], { cwd: projectA });
+});
+
+check('el techo acota una exención larguísima al declararla, y lo dice', () => {
+  // Bajar el default y dejar `--hours` sin techo no cierra el agujero: lo muda. `--hours 99999`
+  // dejaba el candado abierto once años, en silencio.
+  const out = cli(['exempt', '--reason', 'algo', '--hours', '99999', '--cwd', projectA], {
+    cwd: projectA,
+  });
+  assert(out.includes('techo'), `no avisó del recorte: ${out}`);
+  assertEqual(estadoDe(projectA).exemption.hours, 8, 'guardó una ventana por encima del techo');
+  cli(['exempt', '--clear', '--cwd', projectA], { cwd: projectA });
+});
+
+check('config set tampoco deja pasar por encima del techo', () => {
+  let salió = null;
+  try {
+    cli(['config', 'set', '--key', 'defaults.exemption_hours', '--value', '9999']);
+  } catch (e) {
+    salió = e;
+  }
+  assert(salió, 'config set aceptó una ventana por encima del techo');
 });
 
 check('el candado se puede apagar por configuración', () => {
