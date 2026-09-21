@@ -1456,6 +1456,24 @@ function requireRegistered(config, cwd, what) {
     );
     return null;
   }
+  // TENER ENTRADA NO ES ESTAR CONFIGURADO, y confundirlos dejaba pasar un proyecto a medio hacer.
+  //
+  // El guard le crea una entrada `pending` a cada proyecto por el que pregunta: es cómo recuerda
+  // que ya lo vio. Eso NO es una decisión del usuario — es lo contrario, es la decisión pendiente.
+  // Con el chequeo anterior (`hay entrada` y `no está excluido`) un `claim` procedía contra un
+  // proyecto sin `list_id`, sin estados mapeados y sin destino: la tarea no se podía crear en
+  // ningún lado, pero el claim quedaba escrito y el candado abierto.
+  //
+  // Lo encontró el suite, no una lectura: `claim no falló en un proyecto sin configurar`, después
+  // de que un test anterior hiciera que el guard preguntara por ese mismo directorio.
+  if (!isActive(entry)) {
+    err(
+      `Este proyecto se vio antes, pero nadie decidió todavía si lleva tareas en ClickUp, así que ` +
+        `no hay nada que ${what}.\n` +
+        'Decidilo: `/clickup-setup` para configurarlo, o `clickup-flow project exclude` si no va.',
+    );
+    return null;
+  }
   return entry;
 }
 

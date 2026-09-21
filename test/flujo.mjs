@@ -148,9 +148,10 @@ step('un proyecto sin configurar no se bloquea en silencio: se PREGUNTA', () => 
   for (const [name, dir] of Object.entries(P)) {
     const r = guard(dir, path.join(dir, 'x.js'));
     if (!r.blocked) continue;
+    // `why`, no `stderr`: el helper de este suite devuelve `{ blocked, why }`.
     assert(
-      /falta decidir si este proyecto/i.test(r.stderr ?? ''),
-      `bloqueó ${name} sin explicar por qué: ${(r.stderr ?? '').slice(0, 200)}`,
+      /falta decidir si este proyecto/i.test(r.why ?? ''),
+      `bloqueó ${name} sin explicar por qué: ${(r.why ?? '').slice(0, 200)}`,
     );
   }
 });

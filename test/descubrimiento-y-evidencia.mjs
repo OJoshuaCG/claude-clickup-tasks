@@ -128,14 +128,25 @@ function leerConfig() {
 console.log('\nDESCUBRIMIENTO: UN PROYECTO NUEVO PREGUNTA UNA VEZ\n');
 
 {
-  const r = guard(NUEVO, `${NUEVO}/src/app.py`);
+  // LA PRIMERA LLAMADA TAMBIÉN LLEVA `prompt_id`, y no es decoración.
+  //
+  // Sin `prompt_id` NI `session_id`, el guard no tiene con qué acotar el "omitir" a esta vuelta y
+  // cae —a propósito— al aplazamiento por días, para no preguntar en bucle dentro del mismo
+  // turno. Eso dejaba el proyecto pospuesto una semana y silenciaba todas las preguntas que este
+  // bloque verifica después. Antes se tapaba solo: el suite heredaba el `CLAUDE_CODE_SESSION_ID`
+  // real de quien corría los tests, así que siempre había un id. Al volverlo hermético quedó a la
+  // vista. Cada pregunta que este bloque prueba es una SOLICITUD distinta, y se dice explícito.
+  const r = guard(NUEVO, `${NUEVO}/src/app.py`, 'solicitud-0');
   assert(r.code === 2, 'la primera escritura en un proyecto desconocido BLOQUEA', `exit ${r.code}`);
   assert(
     /clickup-setup/.test(r.err) && /exclude/.test(r.err) && /snooze/.test(r.err),
     'el mensaje ofrece los tres caminos, no uno',
   );
+  // La regla es que el modelo PREGUNTE y ejecute, nunca que conteste por el usuario. La frase que
+  // lo decía («No decidas vos») se reescribió cuando las preguntas pasaron a `AskUserQuestion`;
+  // vive ahora en el protocolo. Lo que el guard tiene que seguir ordenando es esto.
   assert(
-    /No decidas vos/i.test(r.err),
+    /PREGUNTALE AL USUARIO/i.test(r.err) && /EJECUTÁ SU RESPUESTA/i.test(r.err),
     'le prohíbe al modelo contestar por el usuario',
   );
 }
