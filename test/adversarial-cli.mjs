@@ -109,9 +109,23 @@ for (const hook of HOOKS) {
   for (const [label, input] of ENTRADAS_HOSTILES) {
     check(`${hook} sobrevive: ${label}`, () => {
       const r = run([hook], input);
-      // 0 siempre; el guard puede devolver 2 solo si decide bloquear, y con estas entradas
-      // (proyecto sin registrar) no debería bloquear nunca.
-      assert(r.code === 0, `exit ${r.code}\n         stderr: ${r.stderr.slice(0, 300)}`);
+      // QUÉ SIGNIFICA "SOBREVIVIR", que es lo que este test siempre quiso decir: no reventar, no
+      // colgarse, no filtrar un stack. NO significa "salir con 0".
+      //
+      // La aserción decía `code === 0` con el comentario «con estas entradas (proyecto sin
+      // registrar) no debería bloquear nunca», y eso dejó de ser cierto cuando el guard pasó a
+      // PREGUNTAR una vez por los proyectos sin decidir. Esa pregunta sale con 2 a propósito: un
+      // proyecto sin decidir es uno donde la herramienta no hace nada y nadie se entera.
+      //
+      // Entonces se acepta el 2, pero no cualquiera: tiene que venir con la pregunta. Un 2 sin
+      // ella sería el bloqueo mudo que este suite existe para cazar.
+      assert(r.code === 0 || r.code === 2, `exit ${r.code}\n         stderr: ${r.stderr.slice(0, 300)}`);
+      if (r.code === 2) {
+        assert(
+          /falta decidir si este proyecto/i.test(r.stderr),
+          `salió con 2 sin explicar por qué:\n${r.stderr.slice(0, 300)}`,
+        );
+      }
       assert(!tieneStack(r.stderr), `filtró un stack trace:\n${r.stderr.slice(0, 300)}`);
     });
   }

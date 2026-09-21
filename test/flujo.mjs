@@ -138,10 +138,20 @@ step('la herramienta queda instalada', () => {
   assert(fs.existsSync(CLI), 'no se copió el motor');
 });
 
-step('ningún proyecto queda bloqueado antes de configurarse', () => {
+step('un proyecto sin configurar no se bloquea en silencio: se PREGUNTA', () => {
+  // Este paso afirmaba que no se bloqueaba nada antes de configurar, y era cierto cuando se
+  // escribió. Después el guard pasó a preguntar una vez por cada proyecto sin decidir, porque un
+  // proyecto sin decisión es uno donde la herramienta no hace nada y nadie se entera.
+  //
+  // Lo que sigue valiendo, y es lo que este paso cuida ahora: si frena, es para preguntar, y lo
+  // dice. Un frenazo mudo sería el defecto.
   for (const [name, dir] of Object.entries(P)) {
     const r = guard(dir, path.join(dir, 'x.js'));
-    assert(!r.blocked, `bloqueó ${name}, que no está configurado`);
+    if (!r.blocked) continue;
+    assert(
+      /falta decidir si este proyecto/i.test(r.stderr ?? ''),
+      `bloqueó ${name} sin explicar por qué: ${(r.stderr ?? '').slice(0, 200)}`,
+    );
   }
 });
 

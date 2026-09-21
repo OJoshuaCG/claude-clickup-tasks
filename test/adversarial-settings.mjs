@@ -23,6 +23,7 @@ const {
   removeHooks,
   mergePermissions,
   unmergePermissions,
+  READONLY_MCP_PERMISSIONS,
   inspectInstalled,
   hookSpecs,
   HOOK_COUNT,
@@ -143,15 +144,23 @@ check('unmergePermissions no toca los permisos del usuario', () => {
   const { settings } = readSettings();
   mergePermissions(settings);
   const n = unmergePermissions(settings);
-  // 8 permisos del usuario + los nuestros. El total sale del producto, no de un número copiado.
-  assert(n === 11 - 3 + HOOK_COUNT, `quitó ${n} en vez de ${11 - 3 + HOOK_COUNT}`);
+  // El total sale de la MISMA lista que usa el producto.
+  //
+  // Estuvo escrito a mano (`11`) y quedó desfasado cuando la lista creció. Un primer intento de
+  // arreglo lo ató a `HOOK_COUNT`, y eso estaba peor: los permisos y los hooks son dos cosas
+  // distintas que coincidían por casualidad. Un número derivado de la fuente equivocada es más
+  // frágil que uno copiado, porque parece robusto.
+  assert(
+    n === READONLY_MCP_PERMISSIONS.length,
+    `quitó ${n} en vez de ${READONLY_MCP_PERMISSIONS.length}`,
+  );
   assert(settings.permissions.allow.includes('mcp__mio__*'), 'perdió un allow del usuario');
   assert(settings.permissions.allow.includes('Bash(ls)'), 'perdió otro allow del usuario');
   assert(settings.permissions.deny.includes('Read(.env)'), 'perdió un deny del usuario');
   assert(settings.permissions.allow.length === 2, `quedaron ${settings.permissions.allow.length}`);
 });
 
-check('un wildcard de ClickUp ya presente evita agregar los 11', () => {
+check('un wildcard de ClickUp ya presente evita agregar los permisos uno por uno', () => {
   write({ permissions: { allow: ['mcp__claude_ai_ClickUp__*'] } });
   const { settings } = readSettings();
   const added = mergePermissions(settings);

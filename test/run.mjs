@@ -28,7 +28,7 @@ import { canonicalProjectKey } from '../src/lib/paths.mjs';
 // Estaba puesto a mano y quedó desfasado en silencio: los tests decían 3 cuando el producto ya
 // instalaba 6, y nadie se enteró hasta que alguien corrió el suite completo. Un test que afirma
 // un número viejo no falla ruidosamente: falla siempre, y se aprende a ignorarlo.
-import { HOOK_COUNT } from '../src/lib/settings.mjs';
+import { HOOK_COUNT, hookSpecs } from '../src/lib/settings.mjs';
 
 
 const HERE = path.dirname(fileURLToPath(import.meta.url));
@@ -345,9 +345,12 @@ check('agrega permisos de lectura de ClickUp', () => {
 check('reinstalar es idempotente: no duplica hooks', () => {
   run([INSTALLER, '--yes']);
   const mine = ourHooks();
-  assertEqual(mine.length, 4, `quedaron ${mine.length} hooks nuestros en vez de 4`);
+  assertEqual(mine.length, HOOK_COUNT, `quedaron ${mine.length} hooks nuestros en vez de ${HOOK_COUNT}`);
+  // Los eventos esperados salen del producto. Escritos a mano quedaron desfasados en silencio en
+  // cuanto se agregó un hook, y un test que afirma una lista vieja no avisa: falla siempre.
   const events = mine.map((h) => h.event).sort().join(',');
-  assertEqual(events, 'PostToolUse,PreToolUse,SessionStart,Stop', 'eventos registrados');
+  const esperados = hookSpecs('x').map((h) => h.event).sort().join(',');
+  assertEqual(events, esperados, 'eventos registrados');
   // and the user's own hooks survive a second pass
   const flat = JSON.stringify(readSettings().hooks);
   assert(flat.includes('codegraph prompt-hook'), 'la reinstalación perdió el hook del usuario');
