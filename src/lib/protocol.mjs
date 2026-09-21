@@ -113,7 +113,12 @@ export function buildContext(config, cwd, sessionId = null) {
     identity: config.identity || {},
     identityReady: identityReady(config),
     defaults,
-    team: config.team || {},
+    // `team` NO se expone acá, y la ausencia es deliberada.
+    //
+    // Estuvo expuesto como `ctx.team` y no lo leía nadie: ni un render, ni el guard, ni un hook.
+    // Un campo que el contexto ofrece invita a usarlo creyendo que está cableado, y este no lo
+    // está. Cuando se cablee —traducir el email de un `INICIO` ajeno a un nombre de persona—
+    // vuelve, junto con el código que lo consume.
     // TODAS las tareas reclamadas del proyecto. Lista, nunca null, y sin ningun campo que
     // signifique "la actual".
     //

@@ -2776,23 +2776,34 @@ function cmdDoctor(args = { _: [] }) {
       warnings++;
     }
 
-    // El equipo vacío no rompe nada visible, y ese es justamente el problema: el protocolo dice
-    // existir para que dos personas no trabajen lo mismo en paralelo, y sin el mapeo
-    // git-email → id de ClickUp no hay forma de saber que la tarea la tomó otro. La función
-    // declarada del sistema no tiene los datos que necesita para funcionar.
+    // ACÁ ESTABA EL PEOR DEFECTO DE ESTE `doctor`: avisaba que una protección estaba rota, y
+    // estaba sana.
+    //
+    // Decía «VACÍO — la detección de colisiones entre personas NO puede funcionar», y es falso.
+    // Las colisiones se detectan comparando el email que va escrito DENTRO del comentario
+    // `INICIO` contra el tuyo (paso 2 del protocolo). Ese mapa no participa, y no podría: todos
+    // los comentarios se publican con la cuenta del token, así que el campo "autor" de ClickUp no
+    // distingue a nadie — por eso el email va en el cuerpo del comentario y no se deduce de otro
+    // lado.
+    //
+    // Un `doctor` que reporta rota una protección sana deja dos salidas y las dos son malas: o le
+    // hacés caso y cargás datos que no consume nadie, o aprendés a ignorar sus warnings. Lo
+    // segundo es lo que termina pasando, y ahí se lleva puestos también los avisos que sí valen.
+    //
+    // Hoy `config.team` es un mapa de SOLO ESCRITURA: `team add` lo llena, `team list` lo muestra
+    // y nada más lo consume. Se reporta como lo que es, sin warning. Cuando se cablee —traducir
+    // el email de un `INICIO` ajeno a un nombre de persona al reportar la colisión— este bloque
+    // vuelve a tener algo que exigir.
     const equipo = Object.keys(config.team ?? {}).length;
     if (equipo === 0) {
-      lines.push('equipo          VACÍO — la detección de colisiones entre personas NO puede funcionar');
-      lines.push('                Sin `git email → id de ClickUp` no hay forma de reconocer que una');
-      lines.push('                tarea la tomó otro. Cargá al menos a tus compañeros de lista:');
-      lines.push('                  clickup-flow team add --git-email <e> --clickup-id <id>');
-      warnings++;
+      lines.push('equipo          vacío — hoy no lo consume nada, así que no falta para nada');
+      lines.push('                (las colisiones se detectan por el email del comentario `INICIO`)');
     } else {
       const sinConfirmar = Object.values(config.team).filter((m) => !m?.confirmed).length;
       lines.push(
-        `equipo          ${equipo} persona(s)${sinConfirmar ? `, ${sinConfirmar} sin confirmar` : ''}`,
+        `equipo          ${equipo} persona(s)${sinConfirmar ? `, ${sinConfirmar} sin confirmar` : ''}` +
+          ' — guardado, todavía sin consumir',
       );
-      if (sinConfirmar) warnings++;
     }
     const projects = Object.entries(config.projects ?? {});
     const activos = projects.filter(([, p]) => isActive(p)).length;

@@ -263,6 +263,23 @@ check('context, status y doctor funcionan con y sin proyecto', () => {
   assert(!tieneStack(d.stderr), 'doctor filtró stack');
 });
 
+check('el doctor NO declara rota la detección de colisiones por tener el equipo vacío', () => {
+  // REGRESIÓN CON NOMBRE PROPIO. El aviso decía «VACÍO — la detección de colisiones entre
+  // personas NO puede funcionar», y es falso: las colisiones se detectan comparando el email
+  // escrito DENTRO del comentario `INICIO` contra el tuyo. `config.team` no participa — de hecho
+  // hoy no lo consume nada.
+  //
+  // Un `doctor` que reporta rota una protección sana deja dos salidas y las dos son malas: o le
+  // hacés caso y cargás datos que nadie lee, o aprendés a ignorar sus warnings. Lo segundo se
+  // lleva puestos también los avisos que sí valen, y por eso esto tiene test.
+  const salida = `${run(['doctor']).stdout}`;
+  assert(/equipo/.test(salida), 'el doctor ni siquiera menciona el equipo: el test no prueba nada');
+  assert(
+    !/NO puede funcionar/i.test(salida),
+    'volvió el aviso que declara rota una protección que está sana',
+  );
+});
+
 check('con el config corrupto, TODO degrada sin stack traces', () => {
   const cfgPath = path.join(fakeClaude, 'clickup-flow', 'config.json');
   const bueno = fs.readFileSync(cfgPath, 'utf8');

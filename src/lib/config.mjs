@@ -302,8 +302,13 @@ export function defaultConfig() {
     // Keyed by canonical project path. `git_remote` lets the same repo be recognised in a
     // second checkout without asking again.
     projects: {},
-    // git email -> ClickUp identity, for assigning work to teammates. Mirrors the
-    // clickup-usuarios.json idea from the frontend repo, including its `confirmed` flag.
+    // git email -> ClickUp identity. Mirrors the clickup-usuarios.json idea from the frontend
+    // repo, including its `confirmed` flag.
+    //
+    // OJO: hoy NADA lo consume. `team add` lo escribe y `team list` lo muestra, y ahí termina.
+    // La detección de colisiones no lo usa —compara el email escrito dentro del comentario
+    // `INICIO`— así que un `team` vacío no rompe nada. El comentario anterior decía "for
+    // assigning work to teammates" y eso era la intención, no el estado.
     team: {},
   };
 }
