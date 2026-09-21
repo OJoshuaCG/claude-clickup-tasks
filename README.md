@@ -718,11 +718,21 @@ Y registrar un nombre **nunca** cuenta como evidencia de trabajo. Si contara, re
 alcanzaría para abrir el candado y soltar el claim sin haber comentado ni cerrado nada — la misma
 asimetría por la que el cronómetro tiene su propio registro.
 
-**Hueco conocido, documentado y no resuelto:** una tarea **preexistente** que se reclama sin
-crearla ni renombrarla no pasa su nombre por ningún matcher, así que se queda sin `clickup_name` y
-la divergencia no se puede detectar. Cubrirlo exige un matcher de solo lectura para
-`clickup_get_task`, o sea un hook más en el `settings.json` de cada instalación. Es una decisión
-aparte y no se tomó de contrabando.
+**Y las tareas preexistentes se cubren con un séptimo hook, de solo lectura.** Una tarea que se
+reclama sin crearla ni renombrarla no pasa su nombre por ninguna mutación, así que se quedaba sin
+`clickup_name` — y ese era justamente el caso del incidente. `clickup_get_task` tiene ahora su
+propio matcher y su propio subcomando, `name-hook`.
+
+La separación no es organización, es la garantía: **ese hook solo puede llamar a `recordTaskName`.**
+Nunca `recordMcpWrite`, nunca `markEvidenceSeen`. Si una lectura contara como evidencia,
+alcanzaría con *abrir* una tarea para poder soltar el claim sin haber comentado ni cerrado nada: el
+candado se abriría con solo mirar. Hay un test que afirma exactamente eso.
+
+Se eligió esto sobre la alternativa barata —que el modelo pasara `--task-name` al reclamar— y no
+por el costo, que es un spawn por lectura y unas pocas lecturas por ciclo. Por coherencia: toda
+esta herramienta existe para dejar de depender de la palabra del modelo. Un aviso que dice "ojo,
+esta tarea se llama distinto" tiene que apoyarse en algo que el harness vio, no en un dato del
+modelo comparado contra otro dato del modelo.
 
 ### 10. La evidencia estaba coja, y solo se vio validando contra el tablero real
 

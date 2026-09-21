@@ -14,6 +14,13 @@ import path from 'node:path';
 import { execFileSync, spawn } from 'node:child_process';
 import { fileURLToPath } from 'node:url';
 
+// El número de hooks NO se escribe a mano acá.
+//
+// Estaba puesto como `3` y el producto ya instalaba 6: la aserción quedó desfasada en silencio
+// durante meses, que es justo lo que un test tiene que evitar. Ahora sale de la misma constante
+// que usa el instalador, así que agregar un hook no puede dejar este test mintiendo.
+import { HOOK_COUNT } from '../src/lib/settings.mjs';
+
 const REPO = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
 const sandbox = fs.mkdtempSync(path.join(os.tmpdir(), 'cf-conc-'));
 const claude = path.join(sandbox, '.claude');
@@ -169,7 +176,10 @@ await check('dos instaladores a la vez no se pisan', async () => {
   const s = JSON.parse(fs.readFileSync(path.join(c2, 'settings.json'), 'utf8'));
   const hooks = JSON.stringify(s.hooks || {});
   const veces = (hooks.match(/cli\.mjs/g) || []).length;
-  assert(veces === 3, `los hooks quedaron duplicados: ${veces} referencias al CLI (esperaba 3)`);
+  assert(
+    veces === HOOK_COUNT,
+    `los hooks quedaron duplicados: ${veces} referencias al CLI (esperaba ${HOOK_COUNT})`,
+  );
 });
 
 console.log(`\n${pass} pasaron, ${fail} fallaron\n`);

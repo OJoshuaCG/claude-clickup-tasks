@@ -222,6 +222,86 @@ check('con VARIOS ids, el nombre no se le pega a ninguno', () => {
   );
 });
 
+console.log('\nEL HOOK DE SOLO LECTURA: APRENDE EL NOMBRE, NUNCA ABRE EL CANDADO\n');
+
+// `clickup_get_task` tiene su propio matcher y su propio subcomando, y la separación no es
+// organización: es la garantía. Una lectura no prueba que el trabajo se registró. Si contara como
+// evidencia, alcanzaría con ABRIR una tarea para poder soltar el claim sin haber comentado ni
+// cerrado nada — el candado se abriría con solo mirar.
+
+const GET = 'mcp__claude_ai_ClickUp__clickup_get_task';
+
+// Una respuesta realista: la tarea trae anidados `list`, `folder`, `space` y `creator`, y los
+// cuatro tienen `id` y `name`. Quedarse con el de la lista sería peor que no guardar nada.
+const TAREA = {
+  id: T,
+  name: 'Propagar el stale-on-error',
+  status: { status: 'in progress' },
+  list: { id: '4000000001', name: 'Backlog' },
+  folder: { id: '3000000001', name: 'Plataforma' },
+  space: { id: '2000000001', name: 'Acme' },
+  creator: { id: '5000000001', name: 'Otra Persona' },
+};
+
+function leer(tool_response) {
+  S.dropState(PROJ);
+  const env = { ...process.env, CLAUDE_CONFIG_DIR: claudeHome, NO_COLOR: '1' };
+  spawnSync('node', [CLI, 'name-hook'], {
+    env,
+    cwd: PROJ,
+    encoding: 'utf8',
+    input: JSON.stringify({ cwd: PROJ, tool_name: GET, tool_input: { task_id: T }, tool_response }),
+  });
+  const st = S.readState(PROJ);
+  return { names: st.mcp?.names ?? {}, writes: (st.mcp?.writes ?? []).length };
+}
+
+check('aprende el nombre de una respuesta objeto', () => {
+  const r = leer(TAREA);
+  assert(r.names[T] === 'Propagar el stale-on-error', `no lo aprendió: ${JSON.stringify(r.names)}`);
+});
+
+check('aprende el nombre de una respuesta string', () => {
+  assert(leer(JSON.stringify(TAREA)).names[T] === 'Propagar el stale-on-error', 'no parseó el string');
+});
+
+check('aprende el nombre atravesando el envoltorio MCP', () => {
+  const r = leer({ content: [{ type: 'text', text: JSON.stringify(TAREA) }] });
+  assert(r.names[T] === 'Propagar el stale-on-error', 'no atravesó el envoltorio');
+});
+
+check('NO se queda con el nombre de la lista, la carpeta, el espacio ni el creador', () => {
+  const r = leer(TAREA);
+  const guardados = Object.values(r.names);
+  for (const ajeno of ['Backlog', 'Plataforma', 'Acme', 'Otra Persona']) {
+    assert(
+      !guardados.includes(ajeno),
+      `se quedó con "${ajeno}": el aviso de divergencia diría que la tarea se llama así y ` +
+        'mandaría a dudar de un claim que estaba bien',
+    );
+  }
+  assert(Object.keys(r.names).length === 1, `guardó de más: ${JSON.stringify(r.names)}`);
+});
+
+check('LA INVARIANTE: leer una tarea NO deja evidencia de trabajo', () => {
+  const r = leer(TAREA);
+  assert(
+    r.writes === 0,
+    'una lectura quedó registrada como mutación: alcanzaría con ABRIR una tarea para soltar el ' +
+      'claim sin haber comentado ni cerrado nada',
+  );
+});
+
+check('una respuesta sin `name` no inventa nada', () => {
+  const r = leer({ id: T, status: { status: 'to do' } });
+  assert(Object.keys(r.names).length === 0, `inventó un nombre: ${JSON.stringify(r.names)}`);
+});
+
+check('una respuesta sin `id` no se le pega a ninguna tarea', () => {
+  const r = leer({ name: 'Algo', list: { id: '4000000001', name: 'Backlog' } });
+  assert(Object.keys(r.names).length === 0, `adivinó a qué tarea pertenecía: ${JSON.stringify(r.names)}`);
+});
+
 console.log(`\n${pass} pasaron, ${fail} fallaron\n`);
 if (fail) {
   for (const f of failures) console.log(`  - ${f.name}: ${f.err.message}`);

@@ -887,6 +887,81 @@ function extractCanonicalName(payload, ids = []) {
 }
 
 /**
+ * Normalizar un `tool_response` a objeto, atravesando el envoltorio MCP si lo hay.
+ *
+ * Tres formas, y las tres aparecen de verdad: el objeto directo, el JSON adentro de un string, y
+ * `{content:[{type:'text', text:'<json>'}]}`, que es como el protocolo MCP envuelve un resultado
+ * de texto.
+ */
+function desenvolverRespuesta(valor) {
+  const directo = objetoDe(valor);
+  if (!directo) return null;
+  if (Array.isArray(directo.content)) {
+    for (const parte of directo.content) {
+      const anidado = objetoDe(parte?.text);
+      if (anidado) return anidado;
+    }
+  }
+  return directo;
+}
+
+/**
+ * El objeto-tarea de la RAÍZ de una respuesta, con su id y su nombre.
+ *
+ * Solo la raíz, y solo los envoltorios conocidos (`data`, `task`, `result`). NO se desciende a
+ * cualquier objeto anidado que tenga `id` y `name`, porque la respuesta de una tarea trae adentro
+ * `list`, `folder`, `space` y `creator` —todos con esas dos claves— y quedarse con el nombre de
+ * la lista sería peor que no guardar nada: el aviso de divergencia diría que la tarea "se llama
+ * Backlog" y mandaría a cualquiera a dudar de un claim que estaba bien.
+ */
+function raizTarea(obj) {
+  if (!obj || typeof obj !== 'object' || Array.isArray(obj)) return null;
+  const id = obj.id ?? obj.task_id;
+  const nombre = obj.name;
+  const idTexto = id === undefined || id === null ? '' : String(id).trim();
+  if (typeof nombre === 'string' && nombre.trim() && idTexto) {
+    return { taskId: idTexto, name: nombre.trim() };
+  }
+  for (const k of ['data', 'task', 'result']) {
+    const anidado = raizTarea(obj[k]);
+    if (anidado) return anidado;
+  }
+  return null;
+}
+
+/**
+ * Hook `PostToolUse` sobre las LECTURAS de tareas. Escribe el nombre, y NADA más.
+ *
+ * ESTA FUNCIÓN TIENE UNA SOLA REGLA Y ES LA RAZÓN DE QUE EXISTA APARTE: no puede llamar a
+ * `recordMcpWrite` ni a `markEvidenceSeen`. Nunca. Una lectura no es prueba de que el trabajo se
+ * registró, y si contara como evidencia alcanzaría con ABRIR una tarea para poder soltar el claim
+ * sin haber comentado ni cerrado nada. El candado se abriría solo con mirar.
+ *
+ * Por eso tampoco comparte el matcher con las mutaciones: la separación no es organización, es la
+ * garantía. Ver `MCP_READ_TOOLS` en settings.mjs.
+ *
+ * Qué resuelve: una tarea PREEXISTENTE, reclamada sin crearla ni renombrarla, no pasaba su nombre
+ * por ninguna mutación. Sin nombre canónico, la divergencia contra el `title` que escribe el
+ * modelo era indetectable — y esa divergencia, leída como "estado corrupto", produjo el incidente
+ * del 2026-09-21 en el que una sesión soltó el claim de otra.
+ */
+async function cmdNameHook() {
+  const payload = await readHookInput();
+  const cwd = hookCwd(payload);
+  const { config, ok } = loadConfig();
+  if (!ok) return 0;
+
+  const ctx = buildContext(config, cwd, sessionIdFrom(payload));
+  if (!ctx.registered) return 0;
+
+  const tarea = raizTarea(desenvolverRespuesta(payload?.tool_response));
+  if (!tarea) return 0;
+
+  recordTaskName(ctx.matchedKey || ctx.cwd, tarea);
+  return 0;
+}
+
+/**
  * Hook `PostToolUse` sobre las herramientas de ESCRITURA del MCP de ClickUp.
  *
  * Acá se cierra el hueco que la crítica llamó "el defecto de fondo": el sistema prometía
@@ -2898,7 +2973,7 @@ Configuración
   doctor                      Verifica la instalación
 
 Hooks (los invoca el harness, no vos)
-  session-start | guard | timer-guard | sync-hook | timer-hook | stop-hook
+  session-start | guard | timer-guard | sync-hook | name-hook | timer-hook | stop-hook
   prompt-hook                 obsoleto: ya no se instala, sale sin hacer nada
 `;
 
@@ -2916,6 +2991,8 @@ async function main() {
       return cmdGuard();
     case 'sync-hook':
       return cmdSyncHook();
+    case 'name-hook':
+      return cmdNameHook();
     case 'timer-guard':
       return cmdTimerGuard();
     case 'timer-hook':
@@ -2962,7 +3039,14 @@ async function main() {
 // The catch-all is what makes the golden rule true. A hook that throws would surface as a broken
 // turn in an unrelated repository, so hooks always resolve to a silent 0 and only real commands
 // are allowed to report a failure.
-const HOOKS = new Set(['session-start', 'prompt-hook', 'guard', 'sync-hook', 'stop-hook']);
+const HOOKS = new Set([
+  'session-start',
+  'prompt-hook',
+  'guard',
+  'sync-hook',
+  'name-hook',
+  'stop-hook',
+]);
 main()
   .then((code) => process.exit(typeof code === 'number' ? code : 0))
   .catch((error) => {

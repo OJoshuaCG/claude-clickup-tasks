@@ -128,6 +128,24 @@ export const MCP_WRITE_TOOLS = [
 ];
 
 /**
+ * Herramientas que LEEN una tarea. Van en su propio matcher, y la separación es la garantía.
+ *
+ * POR QUÉ NO ESTÁN EN `MCP_WRITE_TOOLS`. Porque una lectura NO es prueba de que el trabajo se
+ * registró. Si `clickup_get_task` entrara en aquel matcher, mirar una tarea alcanzaría para
+ * marcarla como sincronizada: se podría reclamar, escribir código, abrir la tarea para mirarla y
+ * soltar el claim sin haber comentado ni cerrado nada. El candado se abriría solo.
+ *
+ * PARA QUÉ SIRVE ENTONCES. Para una cosa y nada más: enterarse de cómo se llama de verdad una
+ * tarea. El `title` del claim lo escribe el modelo, y una tarea PREEXISTENTE —reclamada sin
+ * crearla ni renombrarla— no pasa su nombre por ninguna mutación, así que la divergencia entre
+ * los dos no se podía detectar. Es el hueco que produjo el incidente del 2026-09-21.
+ *
+ * La invariante que sostiene esto vive en `cmdNameHook`: ese hook solo puede llamar a
+ * `recordTaskName`. Nunca `recordMcpWrite`, nunca `markEvidenceSeen`.
+ */
+export const MCP_READ_TOOLS = ['clickup_get_task'];
+
+/**
  * Herramientas del CRONÓMETRO. Van en su propio matcher, y no es un detalle de organización.
  *
  * Si estuvieran en `MCP_WRITE_TOOLS`, arrancar el reloj contaría como evidencia de que el trabajo
@@ -147,6 +165,11 @@ export const MCP_TIME_TOOLS = [
 /** El matcher de PostToolUse, anclado para que no cace herramientas de otro servidor MCP. */
 export function mcpWriteMatcher() {
   return `^mcp__claude_ai_ClickUp__(${MCP_WRITE_TOOLS.join('|')})$`;
+}
+
+/** Ídem, para las lecturas de las que solo se saca el nombre. Ver `MCP_READ_TOOLS`. */
+export function mcpReadMatcher() {
+  return `^mcp__claude_ai_ClickUp__(${MCP_READ_TOOLS.join('|')})$`;
 }
 
 /**
@@ -229,6 +252,12 @@ export function hookSpecs(cliPath) {
       why: 'Sabe si el cronómetro de ClickUp quedó corriendo, mirando el resultado real.',
     },
     {
+      event: 'PostToolUse',
+      matcher: mcpReadMatcher(),
+      command: invoke('name-hook'),
+      why: 'Aprende cómo se llama de verdad una tarea. No registra evidencia de trabajo.',
+    },
+    {
       event: 'Stop',
       matcher: null,
       command: invoke('stop-hook'),
@@ -238,7 +267,7 @@ export function hookSpecs(cliPath) {
 }
 
 /** Cuántos hooks debería haber instalados. `doctor` lo usa para no tener el número a mano. */
-export const HOOK_COUNT = 6;
+export const HOOK_COUNT = 7;
 
 function isOurHook(entry) {
   return typeof entry?.command === 'string' && entry.command.includes(HOOK_MARKER);
