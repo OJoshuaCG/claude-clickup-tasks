@@ -304,6 +304,77 @@ check('cada comando declara el CLI vía {{CLI}}, sin rutas hardcodeadas', () => 
   }
 });
 
+console.log('\nUMBRAL DE TAREAS Y DELEGACIÓN DE LA BÚSQUEDA\n');
+
+// Hay DOS copias de la regla del Paso 0: la que lee la skill y la que imprime `context`, que sale
+// de protocol.mjs. Si divergen, `context` —que se declara con más autoridad que cualquier
+// convención genérica— contradice a la skill y el modelo obedece a la peor de las dos.
+const FRASES_DEL_UMBRAL = [
+  'El punto de partida es NO crear tarea',
+  'Tres reglas de desempate',
+  'El tamaño no manda cuando hay riesgo',
+  'Cada solicitud se evalúa sola',
+  'NO crees tarea',
+];
+
+check('el umbral de tareas dice lo mismo en la skill y en el `context` renderizado', () => {
+  for (const frase of FRASES_DEL_UMBRAL) {
+    assert(SKILL.includes(frase), `SKILL.md perdió la frase: "${frase}"`);
+    assert(PROTO.includes(frase), `protocol.mjs perdió la frase: "${frase}"`);
+  }
+});
+
+check('ninguna copia conserva la regla vieja de "todo cambio que se commitea amerita tarea"', () => {
+  const reglaVieja = 'Cambia código, esquema, configuración o documentación que se commitea';
+  assert(!SKILL.includes(reglaVieja), 'SKILL.md todavía trae la regla vieja');
+  assert(!PROTO.includes(reglaVieja), 'protocol.mjs todavía trae la regla vieja');
+});
+
+check('la búsqueda se delega a clickup-ops sin cederle la decisión', () => {
+  assert(SKILL.includes('clickup-ops'), 'la skill no menciona al agente');
+  assert(PROTO.includes('clickup-ops'), 'el context renderizado no menciona al agente');
+  assert(/La decisión es tuya/.test(SKILL), 'la skill no deja claro que decide el hilo principal');
+  assert(
+    /NO_MATCH[\s\S]{0,120}no te exime/.test(SKILL),
+    'la skill acepta un NO_MATCH del agente barato sin mirar la lista',
+  );
+  assert(
+    /SEARCH_FAILED[\s\S]{0,200}se PARA/.test(SKILL),
+    'la skill no frena cuando la búsqueda delegada falla',
+  );
+});
+
+check('el agente clickup-ops es de solo lectura y corre con un modelo barato', () => {
+  const agente = leer(path.join(ASSETS, 'agents', 'clickup-ops.md'));
+  const frontmatter = /^---\n([\s\S]*?)\n---/.exec(agente);
+  assert(frontmatter, 'el agente no tiene frontmatter');
+  const lineas = frontmatter[1].split('\n');
+  const tools = (lineas.find((l) => l.startsWith('tools:')) ?? '').toLowerCase();
+  const modelo = (lineas.find((l) => l.startsWith('model:')) ?? '').trim();
+  // Lista PERMITIDA, no prohibida: una herramienta de escritura nueva en el agente barato
+  // convertiría un chequeo en un riesgo, y una lista de verbos prohibidos no vería el siguiente.
+  const herramientasDeLectura = [
+    'toolsearch',
+    'mcp__claude_ai_clickup__clickup_search',
+    'mcp__claude_ai_clickup__clickup_filter_tasks',
+    'mcp__claude_ai_clickup__clickup_get_task',
+  ];
+  const declaradas = tools
+    .replace('tools:', '')
+    .split(',')
+    .map((herramienta) => herramienta.trim())
+    .filter((herramienta) => herramienta.length > 0);
+  assert(declaradas.length > 0, 'el agente no declara herramientas');
+  for (const herramienta of declaradas) {
+    assert(
+      herramientasDeLectura.includes(herramienta),
+      `el agente declara una herramienta que no es de lectura: ${herramienta}`,
+    );
+  }
+  assert(modelo === 'model: haiku', `el agente no usa el modelo barato: "${modelo}"`);
+  assert(agente.includes('clickup-flow'), 'sin la marca clickup-flow el instalador lo trataría como ajeno');
+});
+
 console.log(`\n${pass} pasaron, ${fail} fallaron\n`);
 if (fail) {
   for (const f of fallos) console.log(`  - ${f}`);

@@ -479,23 +479,56 @@ export function renderContext(ctx) {
   out.push('');
   out.push('> **¿Alguien más del equipo necesitaría saber que esto pasó?**');
   out.push('');
-  out.push('| Amerita tarea | NO amerita tarea |');
+  out.push(
+    '**El punto de partida es NO crear tarea.** La tarea es la excepción y tiene que ganársela: ' +
+      'un cambio pequeño no la amerita aunque toque código que se commitea. Para crearla tiene que ' +
+      'cumplirse **al menos una** de las condiciones de la columna izquierda.',
+  );
+  out.push('');
+  out.push('| Amerita tarea (basta UNA) | NO amerita tarea (aunque toque código) |');
   out.push('| --- | --- |');
   out.push(
-    '| Cambia código, esquema, configuración o documentación que se commitea | Responder una pregunta, explicar código, leer para entender |',
+    '| Toca **2 o más archivos** de módulos distintos | Cambia **un solo archivo** y pocas líneas: una línea, un valor, un typo, un import |',
   );
   out.push(
-    '| Es un fix de algo reportado o roto | Investigar o diagnosticar **sin** terminar en un cambio |',
+    '| Agrega o cambia **comportamiento, contrato o API** que otro consume | Un fix **pequeño y acotado** que no cambia contratos ni comportamiento visible a otros |',
   );
   out.push(
-    '| Produce un entregable que otro consume | Ajustes del entorno local de quien trabaja |',
+    '| Cambia **esquema, migración, configuración compartida** o dependencias. *Compartida* = versionada y consumida por otros servicios o personas, o que cambia cómo se despliega o se comporta en producción | Comentarios, formato, renombres locales, ajustes de estilo, typos o correcciones menores de documentación |',
   );
-  out.push('| Va a quedar a medias y hay que retomarlo | Un rename hecho dentro de una tarea ya reclamada |');
+  out.push(
+    '| Toca **dinero, autenticación o permisos**, sea cual sea el tamaño | Responder una pregunta, explicar código, leer para entender |',
+  );
+  out.push(
+    '| Es un fix de algo **reportado o roto en producción** y no es trivial | Investigar o diagnosticar **sin** terminar en un cambio |',
+  );
+  out.push(
+    '| Va a **quedar a medias** o a cruzar varias sesiones | Ajustes del entorno local, o un cambio dentro de un trabajo ya reclamado |',
+  );
+  out.push('');
+  out.push('Tres reglas de desempate:');
   out.push('');
   out.push(
-    'Si el diagnóstico **termina** en un cambio, ahí sí amerita — y la fecha de solicitud es la ' +
-      'del pedido original, no la de cuando terminaste de investigar. **Ante la duda, preguntale ' +
-      'al usuario.**',
+    '- **El tamaño no manda cuando hay riesgo.** Una línea que cambia un monto, un permiso o un ' +
+      'contrato SÍ amerita tarea. Una línea que corrige un typo NO.',
+  );
+  out.push(
+    '- **La columna derecha gana sobre "2 o más archivos" cuando el cambio es puramente de estilo, ' +
+      'formato, comentarios o documentación menor.** Cinco archivos con ajustes de estilo no cruzan ' +
+      'el umbral; basta que uno cambie comportamiento, contrato o configuración compartida para que ' +
+      'el conjunto sí lo cruce.',
+  );
+  out.push(
+    '- **Cada solicitud se evalúa sola.** Que el usuario pida varios cambios pequeños seguidos no ' +
+      'los convierte en una tarea: no se crea una tarea por cada pedido, y tampoco una "paraguas" ' +
+      'para justificar el conjunto. Solo se crea si el **conjunto** cruza el umbral de arriba.',
+  );
+  out.push('');
+  out.push(
+    'Si el diagnóstico **termina** en un cambio que cruza el umbral, ahí sí amerita — y la fecha de ' +
+      'solicitud es la del pedido original, no la de cuando terminaste de investigar. **Ante la ' +
+      'duda sobre un cambio pequeño, NO crees tarea**: declará la exención con un motivo concreto y ' +
+      'avanzá. Preguntale al usuario solo si el cambio está *genuinamente* en el borde del umbral.',
   );
   out.push('');
   out.push(
@@ -1141,6 +1174,11 @@ function renderSearch(ctx) {
     );
   }
 
+  out.push('');
+  out.push(
+    'Si el agente `clickup-ops` está disponible, delegale la recolección de candidatos como ' +
+      'describe la skill (`clickup-task-flow`, Paso 2): la decisión sigue siendo tuya.',
+  );
   out.push('');
   out.push(
     '**Probá más de un término en la búsqueda por texto** (el módulo, el síntoma, el nombre ' +

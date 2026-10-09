@@ -75,18 +75,38 @@ La prueba, en una línea:
 
 > **¿Alguien más del equipo necesitaría saber que esto pasó?**
 
-| Amerita tarea | NO amerita tarea |
+**El punto de partida es NO crear tarea.** La tarea es la excepción y tiene que ganársela: un
+cambio pequeño no la amerita aunque toque código que se commitea. Para crearla tienen que
+cumplirse **al menos una** de las condiciones de la columna izquierda.
+
+| Amerita tarea (basta UNA) | NO amerita tarea (aunque toque código) |
 | --- | --- |
-| Cambia código, esquema, configuración o documentación que se commitea | Responder una pregunta, explicar código, leer para entender |
-| Es un fix de algo que se reportó o que se rompió | Investigar o diagnosticar **sin** terminar en un cambio |
-| Produce un entregable que otro consume | Ajustes del entorno local de quien trabaja |
-| Va a quedar a medias y hay que retomarlo | Un rename hecho dentro de un trabajo ya reclamado |
+| Toca **2 o más archivos** de módulos distintos | Cambia **un solo archivo** y pocas líneas: una línea, un valor, un typo, un import |
+| Agrega o cambia **comportamiento, contrato o API** que otro consume | Un fix **pequeño y acotado** que no cambia contratos ni comportamiento visible a otros |
+| Cambia **esquema, migración, configuración compartida** o dependencias. *Compartida* = versionada y consumida por otros servicios o personas, o que cambia cómo se despliega o se comporta en producción | Comentarios, formato, renombres locales, ajustes de estilo, typos o correcciones menores de documentación |
+| Toca **dinero, autenticación o permisos**, sea cual sea el tamaño | Responder una pregunta, explicar código, leer para entender |
+| Es un fix de algo **reportado o roto en producción** y no es trivial | Investigar o diagnosticar **sin** terminar en un cambio |
+| Va a **quedar a medias** o a cruzar varias sesiones | Ajustes del entorno local, o un cambio dentro de un trabajo ya reclamado |
 
-**Si el diagnóstico termina en un cambio, ahí sí amerita** — y la tarea se crea con la fecha en
-que el usuario lo pidió, no con la de cuando terminaste de investigar.
+Tres reglas de desempate:
 
-**Ante la duda, preguntale al usuario.** Una tarea de más es ruido; una de menos es trabajo sin
-rastro en un tablero que otros miran para saber qué está pasando.
+- **El tamaño no manda cuando hay riesgo.** Una línea que cambia un monto, un permiso o un
+  contrato SÍ amerita tarea. Una línea que corrige un typo NO.
+- **La columna derecha gana sobre "2 o más archivos" cuando el cambio es puramente de estilo,
+  formato, comentarios o documentación menor.** Cinco archivos con ajustes de estilo no
+  cruzan el umbral; basta que uno cambie comportamiento, contrato o configuración compartida
+  para que el conjunto sí lo cruce.
+- **Cada solicitud se evalúa sola.** Que el usuario pida varios cambios pequeños seguidos no
+  los convierte en una tarea: no se crea una tarea por cada pedido, y tampoco una "paraguas"
+  para justificar el conjunto. Solo se crea si el **conjunto** cruza el umbral de arriba.
+
+**Si el diagnóstico termina en un cambio que cruza el umbral, ahí sí amerita** — y la tarea se
+crea con la fecha en que el usuario lo pidió, no con la de cuando terminaste de investigar.
+
+**Ante la duda sobre un cambio pequeño, NO crees tarea**: declará la exención con un motivo
+concreto y avanzá. Preguntale al usuario solo si el cambio está *genuinamente* en el borde del
+umbral (por ejemplo, un solo archivo pero con efecto sobre un contrato). Una tarea de más es
+ruido en un tablero compartido; un cambio chico sin tarea se sigue rastreando en el commit.
 
 Si decidís que **no** amerita y vas a escribir código igual, declaralo por escrito o el candado te
 va a frenar:
@@ -216,6 +236,22 @@ con `start` + `duration`.
   mensajes se guardan sin su contenido" no aparece buscando `text_content`.
 - **Paginá** hasta el final (`has_more` / `next_cursor`).
 - **Compará por significado**, no por coincidencia literal de título.
+
+### Delegá la recolección a `clickup-ops` (si existe el agente)
+
+Las tres pasadas generan mucho texto de resultados que no hace falta cargar en este contexto.
+Si el agente `clickup-ops` está disponible, lanzalo con un encargo corto y NO hagas la búsqueda
+vos mismo:
+
+- Pasale: el id de la lista (de `context`), la ventana de cerrados, 3 a 5 términos (módulo,
+  síntoma, nombre técnico) y una frase con el trabajo a chequear.
+- Pedile que devuelva **todos los candidatos** (abiertos sin límite de fecha + cerrados de la
+  ventana + coincidencias por texto), no un veredicto.
+- **La decisión es tuya, no suya.** Comparás los candidatos por significado y resolvés
+  duplicado / nueva / sobre una existente. Un `NO_MATCH` de Haiku no te exime de mirar la lista.
+- Si devuelve `SEARCH_FAILED` o el agente no existe: buscá vos mismo, con las tres pasadas.
+  Si ClickUp tampoco responde, se PARA (regla de arriba). No asumas que está libre.
+- El agente solo lee. Crear, reclamar, comentar y cerrar siguen siendo de este hilo.
 
 ### ¿Tarea nueva, o va sobre una que ya existe?
 
