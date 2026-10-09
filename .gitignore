@@ -20,6 +20,10 @@ clickup-ciclo-*/
 clickup-flujo-*/
 cf-adv-*/
 
+# Registro de skills que genera la herramienta SDD en cada máquina (rutas y skills locales).
+# Se regenera solo; no es parte del producto.
+.atl/
+
 # Valores REALES del tablero para migrar (ids, emails del equipo). Nunca al repositorio:
 # el README lleva solo ejemplos ficticios. Este archivo es para tu máquina.
 MIGRACION.local.md
