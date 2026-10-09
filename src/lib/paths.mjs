@@ -103,6 +103,26 @@ export function realProjectKey(dir) {
 }
 
 /**
+ * ¿Esta carpeta es la raíz de un repositorio git?
+ *
+ * Existe para que la decisión de un proyecto solo se propague a sus subcarpetas cuando la carpeta
+ * registrada ES un proyecto. Una carpeta contenedora (`~/code`) agrupa proyectos sin ser uno: si
+ * se excluye o se configura, esa decisión no puede cubrir a las carpetas hijas, que son proyectos
+ * distintos y que todavía nadie decidió.
+ *
+ * `.git` puede ser una carpeta (clon normal) o un ARCHIVO (worktrees y submódulos), y
+ * `existsSync` cubre las dos formas. Una ruta que no existe, o que no se puede leer, no es raíz.
+ */
+export function isGitRepoRoot(dir) {
+  if (!dir) return false;
+  try {
+    return fs.existsSync(path.join(String(dir), '.git'));
+  } catch {
+    return false;
+  }
+}
+
+/**
  * La ruta de un archivo RELATIVA a la raíz del proyecto, en formato POSIX.
  *
  * Existe por un bug concreto: la exención del candado preguntaba `p.includes('/.claude/')` sobre

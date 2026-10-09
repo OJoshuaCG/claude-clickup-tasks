@@ -16,6 +16,7 @@ import {
   toolHome,
   canonicalProjectKey,
   realProjectKey,
+  isGitRepoRoot,
   writeJsonAtomic,
 } from './paths.mjs';
 
@@ -640,7 +641,10 @@ export function normaliseRemote(url) {
  *
  * Three ways in, deliberately ordered:
  *   1. Exact canonical path.
- *   2. Nearest registered ancestor — so `repo/src/api` resolves to `repo`.
+ *   2. Nearest registered ancestor — so `repo/src/api` resolves to `repo`. Only when that
+ *      ancestor is the root of a git repository: a container folder like `~/code` that was
+ *      excluded or configured must not decide for every project below it, nor for projects that
+ *      do not exist yet. Those children are new projects and get asked.
  *   3. Same git remote — so a second clone of the same repo inherits the setup instead of
  *      asking again. This one only matches non-excluded entries: "I don't want ClickUp in
  *      that checkout" should not silently spread to every other clone.
@@ -670,7 +674,10 @@ export function resolveProject(config, dir) {
   let bestKey = null;
   for (const candidate of Object.keys(projects)) {
     for (const k of real ? [key, real] : [key]) {
-      if (k === candidate || k.startsWith(`${candidate}/`)) {
+      const isSameFolder = k === candidate;
+      const isInsideCandidate = k.startsWith(`${candidate}/`);
+      // El chequeo de disco va al final: solo se paga cuando la ruta ya cae dentro del candidato.
+      if (isSameFolder || (isInsideCandidate && isGitRepoRoot(candidate))) {
         if (!bestKey || candidate.length > bestKey.length) bestKey = candidate;
       }
     }

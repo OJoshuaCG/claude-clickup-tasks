@@ -613,11 +613,19 @@ check('un proyecto excluido no genera ruido en ningún hook', () => {
   assertEqual(g.code, 0, 'el guard bloqueó un proyecto excluido');
 });
 
-check('un subdirectorio resuelve al proyecto padre', () => {
-  const deep = path.join(projectA, 'src', 'deep');
-  const out = cli(['status', '--cwd', deep], { cwd: deep });
-  assert(out.includes('ancestor'), 'no resolvió por ancestro');
-  assert(out.includes('4000000001'), 'no trajo la lista del padre');
+check('un subdirectorio resuelve al proyecto padre cuando el padre es un repo git', () => {
+  // La herencia por ancestro exige que la carpeta registrada sea raíz de un repo. `.git` se crea
+  // solo durante este chequeo: un `.git` vacío podría confundir a los que consultan el remote.
+  const gitMarker = path.join(projectA, '.git');
+  fs.mkdirSync(gitMarker, { recursive: true });
+  try {
+    const deep = path.join(projectA, 'src', 'deep');
+    const out = cli(['status', '--cwd', deep], { cwd: deep });
+    assert(out.includes('ancestor'), 'no resolvió por ancestro');
+    assert(out.includes('4000000001'), 'no trajo la lista del padre');
+  } finally {
+    fs.rmSync(gitMarker, { recursive: true, force: true });
+  }
 });
 
 process.stdout.write('\nEL CANDADO: FAIL CLOSED CUANDO SÍ ESTÁ CONFIGURADO\n');

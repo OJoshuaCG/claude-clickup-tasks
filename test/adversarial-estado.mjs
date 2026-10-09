@@ -330,24 +330,90 @@ function cfgWith(projects) {
   return c;
 }
 
+// La herencia por ancestro exige que la carpeta registrada sea raíz de un repo git, así que estos
+// tests necesitan carpetas REALES con `.git`: con rutas ficticias no habría nada que distinguir.
+const ARBOL = fs.mkdtempSync(path.join(os.tmpdir(), 'cf-adv-arbol-'));
+
+function crearCarpeta(ruta, { comoRepo = false, gitComoArchivo = false } = {}) {
+  fs.mkdirSync(ruta, { recursive: true });
+  if (!comoRepo) return ruta;
+  const marcaGit = path.join(ruta, '.git');
+  if (gitComoArchivo) {
+    // Los worktrees y los submódulos dejan un ARCHIVO `.git`, no una carpeta.
+    fs.writeFileSync(marcaGit, 'gitdir: /ruta/al/worktree\n');
+  } else {
+    fs.mkdirSync(marcaGit, { recursive: true });
+  }
+  return ruta;
+}
+
 check('un hermano con prefijo común NO resuelve al proyecto registrado', () => {
-  // `/a/proj` registrado y cwd `/a/proyecto2`: si el match fuera por startsWith sin separador,
-  // el segundo heredaría el espacio de ClickUp del primero y crearía tareas en el tablero ajeno.
-  const c = cfgWith({ '/a/proj': { mode: 'tasks', list_id: '1', path: '/a/proj' } });
-  assert(C.resolveProject(c, '/a/proyecto2').entry === null, 'resolvió un hermano');
-  assert(C.resolveProject(c, '/a/proj2').entry === null, 'resolvió /a/proj2');
-  assert(C.resolveProject(c, '/a/projX/sub').entry === null, 'resolvió /a/projX/sub');
+  // `<raíz>/proj` registrado y cwd `<raíz>/proyecto2`: si el match fuera por startsWith sin
+  // separador, el segundo heredaría el espacio de ClickUp del primero y crearía tareas en el
+  // tablero ajeno.
+  const proj = crearCarpeta(path.join(ARBOL, 'prefijo', 'proj'), { comoRepo: true });
+  const c = cfgWith({ [proj]: { mode: 'tasks', list_id: '1', path: proj } });
+  const base = path.join(ARBOL, 'prefijo');
+  assert(C.resolveProject(c, `${base}/proyecto2`).entry === null, 'resolvió un hermano');
+  assert(C.resolveProject(c, `${base}/proj2`).entry === null, 'resolvió proj2');
+  assert(C.resolveProject(c, `${base}/projX/sub`).entry === null, 'resolvió projX/sub');
   // Pero el subdirectorio real sí.
-  assert(C.resolveProject(c, '/a/proj/src').matchedBy === 'ancestor', 'no resolvió el hijo real');
+  assert(C.resolveProject(c, `${proj}/src`).matchedBy === 'ancestor', 'no resolvió el hijo real');
 });
 
 check('gana el ancestro MÁS específico', () => {
+  const padre = crearCarpeta(path.join(ARBOL, 'especifico', 'a'), { comoRepo: true });
+  const hijo = crearCarpeta(path.join(padre, 'b', 'c'), { comoRepo: true });
   const c = cfgWith({
-    '/a': { mode: 'tasks', list_id: 'PADRE', path: '/a' },
-    '/a/b/c': { mode: 'tasks', list_id: 'HIJO', path: '/a/b/c' },
+    [padre]: { mode: 'tasks', list_id: 'PADRE', path: padre },
+    [hijo]: { mode: 'tasks', list_id: 'HIJO', path: hijo },
   });
-  assert(C.resolveProject(c, '/a/b/c/d').entry.list_id === 'HIJO', 'ganó el padre');
-  assert(C.resolveProject(c, '/a/b').entry.list_id === 'PADRE', 'no cayó al padre');
+  assert(C.resolveProject(c, `${hijo}/d`).entry.list_id === 'HIJO', 'ganó el padre');
+  assert(C.resolveProject(c, `${padre}/b`).entry.list_id === 'PADRE', 'no cayó al padre');
+});
+
+check('una carpeta contenedora EXCLUIDA no excluye a las carpetas hijas', () => {
+  // El escenario que motivó el cambio: `/clickup-setup` en `~/code` diciendo "no generar tareas".
+  // Los proyectos de adentro son proyectos distintos y nadie decidió nada sobre ellos.
+  const contenedora = crearCarpeta(path.join(ARBOL, 'contenedora-excluida'));
+  const hija = crearCarpeta(path.join(contenedora, 'proyecto'), { comoRepo: true });
+  const c = cfgWith({ [contenedora]: { mode: C.MODES.EXCLUDED, path: contenedora } });
+  assert(C.resolveProject(c, hija).entry === null, 'la hija heredó la exclusión del contenedor');
+  assert(C.resolveProject(c, hija).status === 'unknown', 'la hija no quedó como sin decidir');
+  assert(C.resolveProject(c, `${hija}/src`).entry === null, 'una subcarpeta de la hija heredó');
+  // La carpeta contenedora misma sí sigue resolviendo por su ruta exacta.
+  assert(C.resolveProject(c, contenedora).entry.mode === C.MODES.EXCLUDED, 'perdió la exacta');
+});
+
+check('una carpeta contenedora CON TAREAS tampoco propaga su lista a las hijas', () => {
+  // Heredar una lista de ClickUp crearía tareas en un tablero que nadie eligió para ese proyecto.
+  const contenedora = crearCarpeta(path.join(ARBOL, 'contenedora-tareas'));
+  const hija = crearCarpeta(path.join(contenedora, 'proyecto'), { comoRepo: true });
+  const c = cfgWith({ [contenedora]: { mode: 'tasks', list_id: 'LISTA', path: contenedora } });
+  assert(C.resolveProject(c, hija).entry === null, 'la hija heredó la lista del contenedor');
+});
+
+check('la hija que se registra a sí misma gana sobre un contenedor excluido', () => {
+  const contenedora = crearCarpeta(path.join(ARBOL, 'contenedora-mixta'));
+  const hija = crearCarpeta(path.join(contenedora, 'proyecto'), { comoRepo: true });
+  const c = cfgWith({
+    [contenedora]: { mode: C.MODES.EXCLUDED, path: contenedora },
+    [hija]: { mode: 'tasks', list_id: 'PROPIA', path: hija },
+  });
+  assert(C.resolveProject(c, hija).entry.list_id === 'PROPIA', 'no resolvió la entrada propia');
+  assert(C.resolveProject(c, `${hija}/src`).entry.list_id === 'PROPIA', 'su subcarpeta no la heredó');
+});
+
+check('un `.git` que es ARCHIVO (worktree o submódulo) también cuenta como raíz de repo', () => {
+  const raiz = crearCarpeta(path.join(ARBOL, 'worktree'), { comoRepo: true, gitComoArchivo: true });
+  const c = cfgWith({ [raiz]: { mode: 'tasks', list_id: 'WT', path: raiz } });
+  assert(C.resolveProject(c, `${raiz}/src`).entry?.list_id === 'WT', 'no heredó con .git archivo');
+});
+
+check('una carpeta registrada que ya no existe en disco no propaga nada', () => {
+  const fantasma = path.join(ARBOL, 'borrada', 'proyecto');
+  const c = cfgWith({ [fantasma]: { mode: 'tasks', list_id: 'X', path: fantasma } });
+  assert(C.resolveProject(c, `${fantasma}/src`).entry === null, 'heredó de una carpeta inexistente');
 });
 
 check('un cwd vacío o inválido no resuelve nada', () => {
@@ -664,4 +730,5 @@ if (fail) {
 }
 fs.rmSync(process.env.CLAUDE_CONFIG_DIR, { recursive: true, force: true });
 fs.rmSync(PROJ, { recursive: true, force: true });
+fs.rmSync(ARBOL, { recursive: true, force: true });
 console.log('state.mjs + config.mjs: sin hallazgos.\n');

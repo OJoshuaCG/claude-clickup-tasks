@@ -391,6 +391,12 @@ corresponde.
 El resolver de un proyecto sigue siendo: ruta exacta → **misma carpeta por `realpath`** (dos
 symlinks al mismo directorio dejan de ser dos proyectos) → carpeta ancestro → mismo git remote.
 
+La carpeta ancestro solo cuenta si es **la raíz de un repositorio git** (tiene `.git`, sea carpeta o
+archivo). Una carpeta contenedora como `~/code`, que agrupa proyectos sin serlo, nunca propaga su
+decisión —excluida o con tareas— a las carpetas de adentro: cada proyecto hijo se pregunta por su
+cuenta. Abrir Claude en `repo/src/api` sigue usando la configuración de `repo`. Si un proyecto no es
+un repo git, sus subcarpetas no lo heredan: se registra cada una.
+
 ### Un solo protocolo, resuelto por proyecto
 
 La skill que lee Claude es genérica y **no contiene coordenadas**. Lo primero que hace es correr:
