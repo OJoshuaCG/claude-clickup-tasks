@@ -144,6 +144,16 @@ check('deja un manifiesto de lo que instaló', () => {
   }
 });
 
+check('instala el agente clickup-ops y lo deja en el manifiesto', () => {
+  const agentFile = path.join(fakeClaude, 'agents', 'clickup-ops.md');
+  assert(fs.existsSync(agentFile), 'no instaló el agente clickup-ops');
+  const files = readConfig().installed_files;
+  assert(
+    files.some((f) => f.replace(/\\/g, '/').endsWith('agents/clickup-ops.md')),
+    `el manifiesto no lista el agente: ${JSON.stringify(files)}`,
+  );
+});
+
 check('doctor informa la versión instalada', () => {
   let out = '';
   try {
@@ -300,6 +310,13 @@ check('la desinstalación realmente hace algo', () => {
   // El bug era exactamente esto: imprimía "Desinstalando" y salía sin borrar nada.
   assert(out4.includes('Desinstalado'), `no llegó al final:\n${out4}`);
   assert(out4.includes('hook(s)'), 'no informa haber quitado los hooks');
+});
+
+check('la desinstalación quita el agente clickup-ops', () => {
+  assert(
+    !fs.existsSync(path.join(fakeClaude, 'agents', 'clickup-ops.md')),
+    'el agente clickup-ops quedó instalado',
+  );
 });
 
 check('quita TODOS sus hooks y deja los del usuario', () => {

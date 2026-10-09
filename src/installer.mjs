@@ -21,6 +21,7 @@ import {
   toolHome,
   configPath,
   skillsDir,
+  agentsDir,
   commandsDir,
   backupsDir,
   statePath,
@@ -77,6 +78,9 @@ function toolVersion() {
 
 const SKILL_NAME = 'clickup-task-flow';
 const COMMAND_FILES = ['tarea.md', 'clickup-setup.md', 'clickup-config.md'];
+// Subagentes que la skill usa para que el texto de las búsquedas no entre al contexto del hilo
+// principal.
+const AGENT_FILES = ['clickup-ops.md'];
 
 // ---------------------------------------------------------------------------------------------
 // helpers
@@ -747,6 +751,23 @@ async function install(args) {
     ok(`comando → /${file.replace(/\.md$/, '')}`);
   }
 
+  for (const file of AGENT_FILES) {
+    const dest = path.join(agentsDir(), file);
+    // Same rule as commands: an agent with our name that we did not write is the user's.
+    if (fs.existsSync(dest)) {
+      const current = fs.readFileSync(dest, 'utf8');
+      if (!current.includes('clickup-flow') && !current.includes(cli)) {
+        fs.mkdirSync(backupsDir(), { recursive: true });
+        const bak = path.join(backupsDir(), `${file}.${Date.now()}.bak`);
+        fs.copyFileSync(dest, bak);
+        warn(`el agente ${file.replace(/\.md$/, '')} ya existía y no era nuestro — copia en ${bak}`);
+      }
+    }
+    renderAsset(path.join(ASSETS, 'agents', file), dest, cli);
+    manifest.push(relToClaude(dest));
+    ok(`agente → ${file.replace(/\.md$/, '')}`);
+  }
+
   const stale = pruneStaleFiles(previousFiles, manifest);
   for (const rel of stale) warn(`quitado (esta versión ya no lo trae): ${rel}`);
 
@@ -892,6 +913,13 @@ async function uninstall(args) {
     if (fs.existsSync(dest)) {
       fs.rmSync(dest, { force: true });
       ok(`comando /${file.replace(/\.md$/, '')} eliminado`);
+    }
+  }
+  for (const file of AGENT_FILES) {
+    const dest = path.join(agentsDir(), file);
+    if (fs.existsSync(dest)) {
+      fs.rmSync(dest, { force: true });
+      ok(`agente ${file.replace(/\.md$/, '')} eliminado`);
     }
   }
   // La carpeta de la skill queda vacía si solo tenía nuestro SKILL.md.

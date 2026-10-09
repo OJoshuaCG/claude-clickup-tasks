@@ -41,6 +41,10 @@ export function commandsDir() {
   return path.join(claudeHome(), 'commands');
 }
 
+export function agentsDir() {
+  return path.join(claudeHome(), 'agents');
+}
+
 export function backupsDir() {
   return path.join(toolHome(), 'backups');
 }

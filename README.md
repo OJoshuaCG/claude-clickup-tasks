@@ -110,6 +110,7 @@ Detalles que Windows obliga a manejar y están cubiertos por tests:
 │   └── backups/
 ├── skills/clickup-task-flow/  ← nuevo
 ├── commands/                  ← nuevo: tarea.md, clickup-setup.md, clickup-config.md
+├── agents/clickup-ops.md      ← nuevo: subagente de solo lectura (Haiku) que busca duplicados
 └── settings.json              ← MODIFICADO: se agregan 6 hooks y permisos de lectura
 ```
 
